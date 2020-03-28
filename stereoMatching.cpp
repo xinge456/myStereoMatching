@@ -1,13 +1,5 @@
 
-#include <algorithm>
-//#include <cmath>
-#include <omp.h>
-//#include <iostream>
-//#include <opencv2/imgproc.hpp>
-//#include <opencv2/highgui.hpp>
-#include <opencv2/opencv.hpp>
 #include "stereoMatching.h"
-#include "util.h"
 
 #ifdef _WIN32
 #define popcnt32 __popcnt
@@ -62,7 +54,7 @@ void StereoMatching::adGrad(vector<Mat>& vm)
 		gen_ad_sd_vm(adVm[i], i, 0);
 	grad(gradVm);
 	for (int i = 0; i < 2; i++)
-		gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 20, 30, i);
+		gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.1, 0.9, i);
 	saveFromVm(vm, "gradCensus");
 }
 
@@ -98,8 +90,6 @@ void StereoMatching::calGrad(Mat& grad, Mat& img)
 				gP[u] = iP[1] - iP[0];
 			else
 				gP[u] = iP[w_ - 1] - iP[w_ - 2];
-			//gP[u] = abs(iP[u + 1] - iP[u]) + abs(img.ptr<uchar>(v + 1)[u] - iP[u]);
-			//gP[u] = sqrt(pow(iP[u + 1] - iP[u], 2) + pow(img.ptr<uchar>(v + 1)[u] - iP[u], 2));
 		}
 	}
 }
@@ -276,9 +266,20 @@ void StereoMatching::censusCal(vector<Mat>& vm_census)
 		genCensusCode(I_c, censusCode, param_.W_V, param_.W_U);
 	else
 	{
-		genCensus(I_g[0], censusCode[0], param_.W_V, param_.W_U);
-		genCensus(I_g[1], censusCode[1], param_.W_V, param_.W_U); //编码0
-		//genCensusCode(I_g, censusCode, param_.W_V, param_.W_U);  // 编码1
+		if (param_.censusFunc == 0)
+		{
+			/*	genCensus(I_g[0], censusCode[0], param_.W_V, param_.W_U);
+				genCensus(I_g[1], censusCode[1], param_.W_V, param_.W_U); *///编码0
+			genCensusCode(I_g, censusCode, param_.W_V, param_.W_U);  // 编码1
+		}
+		else if (param_.censusFunc == 1)
+		{
+			genCensusCode_neighC1(I_g, censusCode, param_.W_V, param_.W_U); //
+		}
+		else if (param_.censusFunc == 2)
+			genCensusCode_neighC2(I_g, censusCode, param_.W_V, param_.W_U); //
+		else if (param_.censusFunc == 3)
+			genCensusCode_NC_Sur(I_g, censusCode, param_.W_V, param_.W_U);
 	}
 
 	for (int i = 0; i < imgNum; i++)
@@ -425,7 +426,7 @@ void StereoMatching::dispOptimize()
 		for (int i = 0; i < img_num; i++)
 		{
 			Mat vm_copy = vm[i].clone();
-			selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres, param_.vmTop_Num);
+			selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
 			genDispFromTopCostVm2(topDisp, DP[i]);
 		}
 
@@ -517,7 +518,7 @@ void StereoMatching::refine()
 	{
 		//Mat Dp_res = DP[0].clone();
 		cbbi(DP[0]);
-		signDispChange_forRV(Dp_res, DP[0], DT, I_mask[0], dispChange);
+		signDispChange_forRV(Dp_res, DP[0], DT, I_mask[1], dispChange);
 		saveDispMap<short>(dispChange, "dispCBBIChange.png");
 		saveFromDisp<short>(DP[0], "CBBI");
 	}
@@ -774,7 +775,9 @@ void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 
 void StereoMatching::clearErrTxt()
 {
-	string addr = param_.savePath + "err.txt";
+	string addr = param_.savePath + param_.err_name;
+	if (_access(param_.savePath.c_str(), 0) == -1)  // 判断文件是否存在
+		createDirectory(param_.savePath.c_str());
 	try
 	{
 		FILE* fp;
@@ -799,6 +802,8 @@ void StereoMatching::clearErrTxt()
 void StereoMatching::clearTimeTxt()
 {
 	string addr = param_.savePath + "time.txt";
+	if (_access(param_.savePath.c_str(), 0) == -1)  // 判断文件是否存在
+		createDirectory(param_.savePath.c_str());
 	try
 	{
 		FILE* fp;
@@ -1737,13 +1742,7 @@ void StereoMatching::gen_vm_from2vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 			float* vm1Ptr = vm1.ptr<float>(v, u);
 			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
 			for (int d = 0; d < n; d++)
-			{
-				if (u - W_U < 0 || u + W_U >= w_ || u - d * rightCoefficient - W_U < 0 || u + d * leftCoefficient + W_U >= w_ ||
-					v - W_V < 0 || v + W_V >= h_)
-					combinedVmPtr[d] = DEFAULT_MC;
-				else
-					combinedVmPtr[d] = 2 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1);
-			}
+				combinedVmPtr[d] = 2 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1);
 		}
 	}
 }
@@ -2042,13 +2041,35 @@ void StereoMatching::guideFilter()
 	for (int i = 0; i < 2; i++)
 	{
 		I_c[i].convertTo(I[i], CV_32F);
-		split(vm[i], guideVm[i]);
-		for (int d = 0; d < n; d++)
+		//split(vm[i], guideVm[i]);
+		//for (int d = 0; d < n; d++)
 			//guideFilterCore(guideVm[i][d], I_g[i], guideVm[i][d], 9, 0.001); // radius: 8, 4 // epsilon: 500, 0.0001
-			guideVm[i][d] = guideFilterCore_matlab(I[i], guideVm[i][d], 9, 0.0001);
-		merge(guideVm[i], vm[i]);
+			//guideVm[i][d] = guideFilterCore_matlab(I[i], guideVm[i][d], 9, 0.0001);
+			//ximgproc::guidedFilter(I[i], guideVm[i][d], guideVm[i][d], 9, 0.0001);
+			ximgproc::guidedFilter(I[i], vm[i], vm[i], param_.gf_r, param_.gf_eps);  // gf_r gf_eps
+		//merge(guideVm[i], vm[i]);
 	}
 	//vmTrans(guideVm, vm); // 从2维mat数组赋为3维的mat
+	Mat dispMap(h_, w_, CV_16S);
+	Mat	dispMap2(h_, w_, CV_16S);
+	Mat	result(h_, w_, CV_16S);
+	gen_dispFromVm(vm[0], dispMap);
+	if (!param_.Do_vmTop)
+		saveFromDisp<short>(dispMap, "guide");
+	else
+	{
+		int sizeVmTop[] = { h_, w_, param_.vmTop_Num + 1, 2 };
+		Mat topDisp(4, sizeVmTop, CV_32F);
+		Mat vm_copy = vm[0].clone();
+		selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
+		signCorrectFromTopVm("correctFromTopVmGuide.png", topDisp, DT);
+		genExcelFromTopDisp(topDisp, DT);
+		//genDispFromTopCostVm(topDisp, dispMap2);
+		genDispFromTopCostVm2(topDisp, dispMap2);
+		signDispChange_for2Disp(dispMap, dispMap2, DT, I_mask[1], result);
+		saveDispMap<short>(result, "candidate_Change");
+		saveFromDisp<short>(dispMap2, "guideCand");
+	}
 	saveFromVm(vm, "guide");
 }
 
@@ -2384,12 +2405,12 @@ void StereoMatching::cbca_aggregate()
 					int sizeVmTop[] = { h_, w_, param_.vmTop_Num + 1, 2 };
 					Mat topDisp(4, sizeVmTop, CV_32F);
 					vm_copy = vm[0].clone();
-					selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres, param_.vmTop_Num);
-					//signCorrectFromTopVm("correctFromTopVmCBCA" + to_string(agItNum) + ".png", topDisp, DT);
+					selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
+					signCorrectFromTopVm("correctFromTopVmCBCA" + to_string(agItNum) + ".png", topDisp, DT);
 					genExcelFromTopDisp(topDisp, DT);
 					//genDispFromTopCostVm(topDisp, dispMap2);
 					genDispFromTopCostVm2(topDisp, dispMap2);
-					signDispChange_for2Disp(dispMap, dispMap2, DT, I_mask[0], result);
+					signDispChange_for2Disp(dispMap, dispMap2, DT, I_mask[1], result);
 					saveDispMap<short>(result, "candidate_Change" + to_string(agItNum));
 					saveFromDisp<short>(dispMap2, "cbcatopVm" + to_string(agItNum));
 				}
@@ -2550,7 +2571,7 @@ void StereoMatching::combine_Cross_FW(Mat& vm_dst, Mat& vm_BF, Mat& area, Mat& a
 	Mat dispMat2(h_, w_, CV_16S);
 	gen_dispFromVm(vm_dst, dispMat2);
 	//signDispChange_forRV(dispMat, dispMat2, );
-	signDispChange_for2Disp(dispMat, dispMat2, DT, I_mask[0], result);
+	signDispChange_for2Disp(dispMat, dispMat2, DT, I_mask[1], result);
 	saveDispMap<short>(result, "BF-CBBI_Change" + to_string(imgNum));
 }
 
@@ -3033,7 +3054,98 @@ int StereoMatching::regionVoteCore(Mat& Dp, int v, int u, int SThres, float hrat
  *@searchDepth 表示往左搜寻的深度
  *@numThres 表示找到几个相同的值就不再寻找
  */
+void StereoMatching::backgroundInterpolateCore(Mat& Dp, int v, int u, int* result)
+{
+	vector<int> vec(2, -1);
+	const int searchDepth = param_.bgIplDepth;
+	//const int searchDepth = 15;
+
+	int coeffi = 1;
+	for (int dir = 0; dir < 2; dir++)
+	{ 
+		short* dipP = Dp.ptr<short>(v);
+		for (int d = 1; d <= searchDepth; d++)
+		{
+			int u_nei = u + d * coeffi;
+			if (u_nei >= 0 && u_nei < w_)
+			{
+				if (dipP[u_nei] >= 0)
+				{
+					vec[dir] = dipP[u_nei];
+					break;
+				}
+			}
+			else
+				break;
+		}
+		coeffi *= -1;
+	}
+
+	int candi_num = 0;
+	int disp = 10000;
+	for (int i = 0; i < 2; i++)
+	{
+		if (vec[i] >= 0)
+			candi_num++;
+		if (vec[i] >= 0 && vec[i] < disp)
+			disp = vec[i];
+	}
+	*result = candi_num;
+	result++;
+	if (candi_num == 0)
+		* result = -1;
+	else
+		*result = disp;
+	//int res_num = vec[0] <= vec[1] && vec[0] >= 0 ? 0 : 1;
+	//if (vec[res_num] < 0)
+	//	res_num = res_num == 0 ? 1 : 0;
+	//return vec[res_num];
+}
+
 int StereoMatching::backgroundInterpolateCore(Mat& Dp, int v, int u)
+{
+	vector<int> vec(2, -1);
+	const int searchDepth = param_.bgIplDepth;
+	//const int searchDepth = 15;
+
+	int coeffi = 1;
+	for (int dir = 0; dir < 2; dir++)
+	{
+		short* dipP = Dp.ptr<short>(v);
+		for (int d = 1; d <= searchDepth; d++)
+		{
+			int u_nei = u + d * coeffi;
+			if (u_nei >= 0 && u_nei < w_)
+			{
+				if (dipP[u_nei] >= 0)
+				{
+					vec[dir] = dipP[u_nei];
+					break;
+				}
+			}
+			else
+				break;
+		}
+		coeffi *= -1;
+	}
+
+	int candi_num = 0;
+	int disp = 10000;
+	for (int i = 0; i < 2; i++)
+	{
+		if (vec[i] >= 0)
+			candi_num++;
+		if (vec[i] >= 0 && vec[i] < disp)
+			disp = vec[i];
+	}
+
+	int res_num = vec[0] <= vec[1] && vec[0] >= 0 ? 0 : 1;
+	if (vec[res_num] < 0)
+		res_num = res_num == 0 ? 1 : 0;
+	return vec[res_num];
+}
+
+int StereoMatching::backgroundInterpolateCore_(Mat& Dp, int v, int u)
 {
 	const float color_thre = 40;
 	int neigh_num = param_.bgIpDir;
@@ -3045,11 +3157,6 @@ int StereoMatching::backgroundInterpolateCore(Mat& Dp, int v, int u)
 	short neighVal = -1;
 	vector<float> initial(2, -1);
 	vector<vector<float>> candiDispCost(neigh_num, initial);
-	//uchar* IcP = HSV.ptr<uchar>(v, u);
-	//uchar* IcP = Lab.ptr<uchar>(v, u);
-	//Mat I_tem;
-	//medianBlur(I_c[0], I_tem, 3);
-	//uchar* IcP = I_tem.ptr<uchar>(v, u);
 	Mat I_aim = I_c[0];
 	uchar* IcP = I_aim.ptr<uchar>(v, u);
 	int securityNum = 1;
@@ -3177,17 +3284,21 @@ void StereoMatching::RV_combine_BG(cv::Mat& Dp, float rv_ratio, int rv_s)
 					{
 						if (dpV == param_.DISP_OCC)
 						{
-							dp_bg = backgroundInterpolateCore(Dp, v, u);
-							//dp_bg = properIpolCore(Dp, v, u);
+							int bgIpol[2] = { 0, -1 };
+							backgroundInterpolateCore(Dp, v, u, bgIpol);
 							dp_rv = regionVoteCore(Dp, v, u, SThres, hratioThres);
-							if (dp_bg >= 0 && dp_rv < 0)
-								dp_ = dp_bg;
-							else if (dp_bg < 0 && dp_rv >= 0)
-								dp_ = dp_rv;
-							else if (dp_bg >= 0 && dp_rv >= 0)
-								dp_ = dp_rv <= dp_bg ? dp_rv : dp_bg;  // dp_rv为bg_rv1, dp_bg为bg_rv2
-							else
-								dp_ = -1;
+							//if (bgIpol[0] == 2)
+							//{
+								int dp_bg = bgIpol[1];
+								if (dp_bg >= 0 && dp_rv < 0)
+									dp_ = dp_bg;
+								else if (dp_bg < 0 && dp_rv >= 0)
+									dp_ = dp_rv;
+								else if (dp_bg >= 0 && dp_rv >= 0)
+									dp_ = dp_rv <= dp_bg ? dp_rv : dp_bg;  // dp_rv为bg_rv1, dp_bg为bg_rv2
+								else
+									dp_ = -1;
+							//}
 							//else
 							//	dp_ = dp_rv;
 						}
@@ -3692,6 +3803,75 @@ int StereoMatching::cbbi_core(Mat& Dp, Mat& cutImg, int v, int u)
 	}
 
 	return -1;
+}
+
+void StereoMatching::genExcelFromTopDisp(Mat& topDisp, Mat& DT)
+{
+	int num = topDisp.size[2];
+	ofstream opt;
+	opt.open(param_.savePath + "候选视差.csv", ios::out | ios::trunc);
+	opt << ",";
+	for (int i = 0; i < param_.vmTop_Num; i++)
+	{
+		opt << to_string(i + 1) << "," << ",";
+	}
+	opt << "真实视差" << "," << "视差" << "," << "代价" << "," << "第几顺位(最小是0)" << "," << "和最小代价的差" << "," << "差占最小代价的百分比" << endl;
+	int disp = -1;
+	float cost = numeric_limits<float>::max();
+	int pos = -1;
+	float dif = -1;
+	float ratio = -1;
+	int step = 0;
+	cout << "sdfsdfasdssdsfssssssss" << endl;
+	for (int v = param_.sign_v_range[0]; v < param_.sign_v_range[1]; v++)
+	{
+		opt << "行：" << v << endl;
+		float* dtP = DT.ptr<float>(v);
+		for (int u = param_.sign_u_range[0]; u < param_.sign_u_range[1]; u++)
+		{
+			if (dtP[u] > 0)
+			{
+				
+
+				opt << "列：" << u << ",";
+				float dtV = dtP[u];
+				if (step <= 30)
+				{
+					cout << dtV << endl;
+					step++;
+				}
+				bool has_find = false;
+				//int num_ = topDisp.ptr<float>(v, u, num - 1)[0];
+				int num_ = param_.vmTop_Num;
+				disp = -1;
+				cost = -1;
+				for (int n = 0; n < num_; n++)
+				{
+					float* p = topDisp.ptr<float>(v, u, n);
+					opt << p[0] << "," << p[1] << ",";
+					if (has_find == false)
+					{
+						if (abs(p[0] - dtV) <= param_.errorThreshold)
+						{
+							has_find = true;
+							pos = n;
+							disp = p[0];
+							cost = p[1];
+							dif = cost - topDisp.ptr<float>(v, u, 0)[1];
+							ratio = dif / topDisp.ptr<float>(v, u, 0)[1];
+						}
+					}
+				}
+				opt << dtV << ",";
+				opt << disp << "," << cost << ",";
+				if (has_find)
+					opt << pos << "," << dif << "," << ratio << endl;
+				else
+					opt << endl;
+			}
+		}
+	}
+	opt.close();
 }
 
 void StereoMatching::showParams()

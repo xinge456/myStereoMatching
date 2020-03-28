@@ -1,18 +1,21 @@
 #pragma once
+#include "util.h"
+#include <stdio.h>
 #include <cstdio>
-#include<cstring>
-#include<fstream>
-#include<cstdlib>
-
-#include<streambuf>
+#include <fstream>
+#include <stdlib.h>
+#include <algorithm>
+#include <omp.h>
+#include <streambuf>
 #include <cmath>
 #include <chrono>
-#include <string>
 #include <vector>
+#include <fstream>
 #include <iostream>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/ximgproc/edge_filter.hpp>
 #include <time.h>
 #include <map>
 #include <set>
@@ -99,6 +102,7 @@ public:
 
 		int SD_AD_channel;
 		int census_channel;
+		int censusFunc;
 
 		int Cross_C;
 		int cbcaTrunc_MC_gray;
@@ -125,6 +129,9 @@ public:
 		bool cbca_do_costCompare;
 		int	cbca_armSLimit;
 
+		int gf_r;
+		float gf_eps;
+
 		int region_vote_nums;
 		int regVote_SThres;
 		float regVote_hratioThres;
@@ -141,10 +148,13 @@ public:
 		int vmTop_Num;
 		float vmTop_thres;
 		int vmTop_thres_dirNum;
+		int sign_v_range[2];
+		int sign_u_range[2];
 
 		std::string savePath;
+		std::string err_name;
 
-		Parameters(int maxDisp)
+		Parameters(int maxDisp, int h, int w)
 		{
 			W_U = 4;
 			W_V = 3;
@@ -177,6 +187,8 @@ public:
 			sgm_reduCoeffi1 = 4;
 			sgm_reduCoeffi2 = 10;
 
+			censusFunc = 0; // 0代表中心像素点比，1代表前一个像素点和后一个比，2代表两者的结合，3代表传统Census后接上最内圈前后比较编码
+
 			// 彩色时Cross_L、Cross_C、cbcaTrunc_MC_color的默认值分别为17，20、60
 			Cross_C = 20;
 			cbcaTrunc_MC_gray = 60;
@@ -205,6 +217,9 @@ public:
 			cobineCrossFWType = 4; // 1代表根据交的臂长总和来选择，3代表根据交的面积来选, 4代表通过交的总臂长和单个臂长来选
 			armLSum = 8;
 			armLSingle = 6;
+
+			gf_r = 13;
+			gf_eps = 0.0001;
 			
 			region_vote_nums = 4;
 			regVote_SThres = 20;
@@ -221,10 +236,15 @@ public:
 
 			Do_vmTop = true;
 			vmTop_Num = 6;
-			vmTop_thres = 1.08;
+			vmTop_thres = 10000; //1.08
 			vmTop_thres_dirNum = 8;
+			sign_v_range[0] = 358; // teddy: h-14 venus:91	teddy_GF_1.08_0:91, teddy_GF_1.08_1:358 teddy_CBCA_1.08_0:61,teddy_CBCA_1.08_1:358
+			sign_v_range[1] = 361; // teddy: h-11 venus:92	teddy_GF_1.08_0:94, teddy_GF_1.08_1:361 	teddy_CBCA_1.08_0:64,teddy_CBCA_1.08_0:361
+			sign_u_range[0] = 0; // teddy:0 venus:0			teddy_GF_1.08_0:0
+			sign_u_range[1] = w; // teddy:w	venus:w			teddy_GF_1.08_0:w
 
-			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\";
+			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "CBCA_nlt" + "\\";
+			err_name = "CBCA_nlt.txt";
 		}  
 	};
 
@@ -519,6 +539,251 @@ public:
 									cs++;
 								step++;
 							}
+						}
+					}
+					if (step > 0)
+						censP[dep] = cs;
+				}
+			}
+
+		}
+	}
+
+	// 前一个和后一个像素比较大小来获取编码(沿着每一圈从外往内进行)
+	void genCensusCode_neighC1(vector<Mat>& I, vector<Mat>& census, int R_V, int R_U)
+	{
+		vector<Mat> I_B(2);
+		for (int i = 0; i < 2; i++)
+			copyMakeBorder(I[i], I_B[i], R_V, R_V, R_U, R_U, BORDER_REFLECT_101);
+		const int channels = I[0].channels();
+		//OMP_PARALLEL_FOR
+		int loop_num = min(param_.W_V, param_.W_U);
+		int cof = 0;
+		for (int num = 0; num < 2; num++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				for (int u = 0; u < w_; u++)
+				{
+					uint64_t* censP = census[num].ptr<uint64_t>(v, u);
+					uint64_t cs = 0;
+					int step = 0, dep = 0;
+					int v_ct = v + R_V;
+					int u_ct = u + R_U;
+					for (int i = 0; i < loop_num; i++)
+					{
+						int V_pos = -(param_.W_V - i);
+						int U_pos = -(param_.W_U - i);
+						for (int loop_ = 0; loop_ < 4; loop_++)
+						{
+							if (loop_ % 2 == 0)
+							{
+								if (U_pos > 0) cof = -1; else cof = 1;
+								for (int du = U_pos; du != -U_pos; du += cof)
+								{
+									int v_ = v_ct + V_pos;
+									int u_ = u_ct + du;
+									for (int c = 0; c < channels; c++)
+									{
+										if (step > 63)
+										{
+											censP[dep] = cs;
+											cs = 0;
+											step = 0;
+											dep++;
+										}
+										cs <<= 1;
+										if (I_B[num].ptr<uchar>(v_, u_)[c] - I_B[num].ptr<uchar>(v_, u_ + cof)[c] < 0)
+											cs++;
+										step++;
+									}
+								}
+								U_pos = -U_pos;
+							}
+							else
+							{
+								if (V_pos > 0) cof = -1; else cof = 1;
+								for (int dv = V_pos; dv != -V_pos; dv += cof)
+								{
+									int v_ = v_ct + dv;
+									int u_ = u_ct + U_pos;
+									for (int c = 0; c < channels; c++)
+									{
+										if (step > 63)
+										{
+											censP[dep] = cs;
+											cs = 0;
+											step = 0;
+											dep++;
+										}
+										cs <<= 1;
+										if (I_B[num].ptr<uchar>(v_, u_)[c] - I_B[num].ptr<uchar>(v_ + cof, u_)[c] < 0)
+											cs++;
+										step++;
+									}
+
+								}
+								V_pos = -V_pos;
+							}
+						}
+					}
+					int u_remainer = param_.W_U - loop_num;
+					for (int du = -u_remainer; du < u_remainer; du++)
+					{
+						for (int c = 0; c < channels; c++)
+						{
+							if (step > 63)
+							{
+								censP[dep] = cs;
+								cs = 0;
+								step = 0;
+								dep++;
+							}
+							cs <<= 1;
+							if (I_B[num].ptr<uchar>(v, u + du)[c] - I_B[num].ptr<uchar>(v, u + du + 1)[c] < 0)
+								cs++;
+							step++;
+						}
+					}
+					if (step > 0)
+						censP[dep] = cs;
+				}
+			}
+
+		}
+	}
+
+	// 前一个和后一个像素比较大小来获取编码(蛇行)
+	void genCensusCode_neighC2(vector<Mat>& I, vector<Mat>& census, int R_V, int R_U)
+	{
+		vector<Mat> I_B(2);
+		for (int i = 0; i < 2; i++)
+			copyMakeBorder(I[i], I_B[i], R_V, R_V, R_U, R_U, BORDER_REFLECT_101);
+		const int channels = I[0].channels();
+		//OMP_PARALLEL_FOR
+		for (int num = 0; num < 2; num++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				for (int u = 0; u < w_; u++)
+				{
+					uint64_t* censP = census[num].ptr<uint64_t>(v, u);
+					uint64_t cs = 0;
+					int step = 0, dep = 0;
+					int v_start = v + R_V - R_V;
+					int v_end = v + R_V + R_V;
+					int u_ct = u + R_U;
+					int u_start = u + R_U - R_U;
+					int u_end = u + R_U + R_U;
+					int cof = 1;
+					for (int v_ = v_start; v_ <= v_end; v_++)
+					{
+						for(int u_ = u_start; u_ != u_end; u_ += cof)
+						{
+							for (int c = 0; c < channels; c++)
+							{
+								if (step > 63)
+								{
+									censP[dep] = cs;
+									cs = 0;
+									step = 0;
+									dep++;
+								}
+								cs <<= 1;
+								if (I_B[num].ptr<uchar>(v_, u_)[c] - I_B[num].ptr<uchar>(v_, u_ + cof)[c] < 0)
+									cs++;
+								step++;
+							}
+						}
+						if (v_ < v_end)
+						{
+							for (int c = 0; c < channels; c++)
+							{
+								if (step > 63)
+								{
+									censP[dep] = cs;
+									cs = 0;
+									step = 0;
+									dep++;
+								}
+								cs <<= 1;
+								if (I_B[num].ptr<uchar>(v_, u_end)[c] - I_B[num].ptr<uchar>(v_ + 1, u_end)[c] < 0)
+									cs++;
+								step++;
+							}
+						}
+						u_start ^= u_end;
+						u_end = u_start ^ u_end;
+						u_start = u_start ^ u_end;
+						cof = -cof;
+					}
+					if (step > 0)
+						censP[dep] = cs;
+				}
+			}
+
+		}
+	}
+
+	// 在传统Census编码完成后，后面再跟上最内圈的前后像素的比较编码
+	void genCensusCode_NC_Sur(vector<Mat>& I, vector<Mat>& census, int R_V, int R_U)
+	{
+		vector<Mat> I_B(2);
+		for (int i = 0; i < 2; i++)
+			copyMakeBorder(I[i], I_B[i], R_V, R_V, R_U, R_U, BORDER_REFLECT_101);
+		const int channels = I[0].channels();
+		int dv_sur[] = { -1, -1, -1, 0, 1, 1, 1, 0, -1 };
+		int du_sur[] = { -1, 0, 1, 1, 1, 0, -1, -1 ,-1};
+		int sur_num = 8;
+		//OMP_PARALLEL_FOR
+		for (int num = 0; num < 2; num++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				for (int u = 0; u < w_; u++)
+				{
+					uchar* IP = I_B[num].ptr<uchar>(v + R_V, u + R_U);
+					uint64_t* censP = census[num].ptr<uint64_t>(v, u);
+					uint64_t cs = 0;
+					int step = 0, dep = 0;
+					for (int dv = -R_V; dv <= R_V; dv++)
+					{
+						for (int du = -R_U; du <= R_U; du++)
+						{
+							for (int c = 0; c < channels; c++)
+							{
+								if (step > 63)
+								{
+									censP[dep] = cs;
+									cs = 0;
+									step = 0;
+									dep++;
+								}
+								cs <<= 1;
+								if (IP[c] - I_B[num].ptr<uchar>(v + R_V + dv, u + R_U + du)[c] < 0)
+									cs++;
+								step++;
+							}
+						}
+					}
+					for (int i = 0; i < sur_num; i++)
+					{
+						uchar* pre = I_B[num].ptr<uchar>(v + R_V + dv_sur[i], u + R_U + du_sur[i]);
+						uchar* aft = I_B[num].ptr<uchar>(v + R_V + dv_sur[i + 1], u + R_U + du_sur[i + 1]);
+						for (int c = 0; c < channels; c++)
+						{
+							if (step > 63)
+							{
+								censP[dep] = cs;
+								cs = 0;
+								step = 0;
+								dep++;
+							}
+							cs <<= 1;
+							if (pre[c] - aft[c] < 0)
+								cs++;
+							step++;
+
 						}
 					}
 					if (step > 0)
@@ -1093,24 +1358,17 @@ public:
 	void saveTime(int ms, string procedure)
 	{
 		string addr = param_.savePath + "time.txt";
-		try
+		fstream fout;
+		fout.open(addr, ios::app | ios::out);
+		if (fout.is_open())
 		{
-			FILE* fp;
-			errno_t err;
-			if ((err = fopen_s(&fp, addr.c_str(), "a")) != 0)
-			{
-				throw "ERROR: Couldn't generate/store output statistics!";
-			}
-
-			std::fprintf(fp, "%s：%d\r", procedure, ms);
-			if (err == 0)
-			{
-				std::fclose(fp);
-			}
+			fout << procedure + ": " << ms << "\r";
+			fout.close();
 		}
-		catch (const char* err)
+		else
 		{
-			cerr << *err << endl;
+			cout << "time to txt failed" << endl;
+			exit(1);
 		}
 	}
 
@@ -1119,23 +1377,19 @@ public:
 	template <typename T>
 	void calErr(Mat& DP, Mat& DT, string procedure)
 	{
-		string addr = param_.savePath + "err.txt";
-		try
+		string addr = param_.savePath + param_.err_name;
+		ofstream fout;
+		fout.open(addr, ios::app | ios::out);
+		if (fout.is_open())
 		{
-			FILE* fp;
-			errno_t err;
-			if ((err = fopen_s(&fp, addr.c_str(), "a")) != 0)
-			{
-				throw "ERROR: Couldn't generate/store output statistics!";
-			}
-			CV_Assert(DT.type() == CV_32F);
-			std::fprintf(fp, "%s\t", procedure);
-
+			fout << procedure << "\t";
 			const int THRES = param_.errorThreshold;
 			Mat mask;
 			string regionName = "nonocc";
 			for (int region = 0; region < 3; region++)
 			{
+				if (I_mask[region].empty())
+					continue;
 				if (region == 1)
 					regionName = "all";
 				else if (region == 2)
@@ -1165,29 +1419,21 @@ public:
 								errorNumer++;
 								errorValueSum += 2;  // 这个地方加多少合适呢？
 							}
-								
 						}
 					}
 				}
 				float PBM = (float)errorNumer / sumNum;
 				float rms = sqrt(errorValueSum / sumNum);
 				std::cout << endl << regionName << "\terrorRatio: " << PBM << " epe: " << rms << " " + procedure << endl;
-
-				std::fprintf(fp, "%s\tPBM: %f\tRMS：%f\t", regionName, PBM, rms);
-				if (region == 2)
-					std::fprintf(fp, "\r");
-				else
-					std::fprintf(fp, "\t");
+				fout << regionName + "\tPBM: " << PBM << "\tRMS: " << rms << "\t";
 			}
-
-			if (err == 0)
-			{
-				std::fclose(fp);
-			}
+			fout << "\n";
+			fout.close();
 		}
-		catch (const char* err)
+		else
 		{
-			cerr << *err << endl;
+			cout << "can't write err to txt";
+			exit(0);
 		}
 	}
 
@@ -1297,7 +1543,19 @@ public:
 				}
 			}
 		}
+
+		Mat signImg = biaryImg.clone();
+		for (int v = param_.sign_v_range[0]; v < param_.sign_v_range[1]; v++)
+		{
+			for (int u = param_.sign_u_range[0]; u < param_.sign_u_range[1]; u += 3)
+			{
+				uchar* sP = signImg.ptr<uchar>(v, u);
+				for (int c = 0; c < 3; c++)
+					sP[c] = 125;
+			}
+		}
 		imwrite(addr, biaryImg);  //save biaryImg
+		imwrite(param_.savePath + "sign.png", signImg);  //save biaryImg
 	}
 
 	void errorMap(cv::Mat& DP, cv::Mat& DT, cv::Mat& errMap);
@@ -1525,7 +1783,9 @@ public:
 
 	void LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2);
 	void RV_combine_BG(cv::Mat& Dp, float rv_float, int rv_s);
+	void backgroundInterpolateCore(Mat& Dp, int v, int u, int* result);
 	int backgroundInterpolateCore(Mat& Dp, int v, int u);
+	int backgroundInterpolateCore_(Mat& Dp, int v, int u);
 	int regionVoteCore(Mat& Dp, int v, int u, int SThres, float hratioThres);
 	int properIpolCore(Mat& Dp, int v, int u);
 	void properIpol(cv::Mat& DP, cv::Mat& I1_c);
@@ -1627,7 +1887,7 @@ public:
 	** @thres 阈值百分比(高于或低于极值代价多少范围内的考虑进来）
 	** @num 在thres范围内选择的代价数量
 	*/
-	void selectTopCostFromVolumn(Mat& vm, Mat& topDisp, float thres, int num)
+	void selectTopCostFromVolumn(Mat& vm, Mat& topDisp, float thres)
 	{
 		CV_Assert(topDisp.dims == 4);
 		CV_Assert(topDisp.type() == CV_32F);
@@ -1636,6 +1896,7 @@ public:
 		//Mat vmCopy = vm.clone();
 		float mostBigCost = numeric_limits<float>::max();
 
+		int num = topDisp.size[2] - 1;
 		float firstV = 0;
 		for (int v = 0; v < h_; v++)
 		{
@@ -1685,59 +1946,7 @@ public:
 	}
 
 	// 从topVm找寻指定范围内的正确视差的情况，包括是否含正确视差，正确视差，代价，第几顺位，和最小代价的差，差占最小代价的比重, 存于csv中
-	void genExcelFromTopDisp(Mat& topDisp, Mat& DT)
-	{
-		int num = topDisp.size[2];
-		ofstream opt;
-		opt.open("候选视差.csv", ios::out | ios::trunc);
-		opt << "," << "1" << "," << "," << "2" << "," << "," << "3" << "," << "," << "4" << "," << "," << "是否含正确视差" << 
-			"正确视差" << ","  << "视差" << "," << "代价" << "," << "第几顺位(最小是0)" << "," <<"和最小代价的差" << "," << "差占最小代价的百分比" << endl;
-		int disp = -1;
-		float cost = numeric_limits<float>::max();
-		int pos = -1;
-		float dif = -1;
-		float ratio = -1;
-		for (int v = h_ - 14; v < h_ - 11; v++)
-		{
-			opt << "行：" << v << endl;
-			float* dtP = DT.ptr<float>(v);
-			for (int u = 0; u < w_; u++)
-			{
-				if (dtP[u] > 0)
-				{
-					opt << "列：" << u << ",";
-					float dtV = dtP[u];
-					bool has_find = false;
-					int num_ = topDisp.ptr<float>(v, u, num - 1)[0];
-					for (int n = 0; n < num_; n++)
-					{
-						float* p = topDisp.ptr<float>(v, u, n);
-						opt << p[0] << "," << p[1] << ",";
-						if (has_find == false)
-						{
-							if (abs(p[0] - dtV) <= param_.errorThreshold)
-							{
-								has_find = true;
-								pos = n;
-								disp = p[0];
-								cost = p[1];
-								dif = cost - topDisp.ptr<float>(v, u, 0)[1];
-								ratio = dif / topDisp.ptr<float>(v, u, 0)[1];
-							}
-						}
-					}
-					if (has_find)
-					{
-						opt << "has_find" << "," << disp << "," << cost << "," << pos << "," <<dif << "," << ratio << endl;
-					}
-						
-					else
-						opt << endl;
-				}
-			}
-		}
-		opt.close();
-	}
+	void genExcelFromTopDisp(Mat& topDisp, Mat& DT);
 
 	void genDispFromTopCostVm(Mat& topDisp, Mat& disp) 
 	{
