@@ -51,11 +51,23 @@ void StereoMatching::adGrad(vector<Mat>& vm)
 		gradVm[i].create(3, size_vm, CV_32F);
 	}
 	for (int i = 0; i < 2; i++)
-		gen_ad_sd_vm(adVm[i], i, 0);
+		gen_ad_sd_vm(adVm[i], i, 0, 20);
 	grad(gradVm);
 	for (int i = 0; i < 2; i++)
-		gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.1, 0.9, i);
-	saveFromVm(vm, "gradCensus");
+	{
+		if (param_.adGrad_useAdpWgt)
+		{
+			if (!param_.has_initArm)
+				initArm();
+			if (!param_.has_calArms)
+				calArms();
+			gen_vm_from2vm_add_wgt(HVL[i], vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
+		}
+		else
+			gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
+	}
+		
+	saveFromVm(vm, "adGrad");
 }
 
 void StereoMatching::asdCal(vector<Mat>& vm_asd, string method, int imgNum)
@@ -76,6 +88,7 @@ void StereoMatching::asdCal(vector<Mat>& vm_asd, string method, int imgNum)
 	cout << "AD vm generated" << endl;
 }
 
+// 计算x向梯度:(I(u+1) - I(u-1))/2 
 void StereoMatching::calGrad(Mat& grad, Mat& img)
 {
 	for (int v = 0; v < h_; v++)
@@ -88,7 +101,7 @@ void StereoMatching::calGrad(Mat& grad, Mat& img)
 				gP[u] = ((float)iP[u + 1] - iP[u - 1]) / 2;
 			else if (u == 0)
 				gP[u] = iP[1] - iP[0];
-			else
+			else if (u == w_ - 1)
 				gP[u] = iP[w_ - 1] - iP[w_ - 2];
 		}
 	}
@@ -144,11 +157,11 @@ void StereoMatching::calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, 
 	}
 }
 
-void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num)
+void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float trunc)
 {
 	CV_Assert(grad[0].depth() == CV_32F);
 	const int n = param_.numDisparities;
-	const float costD = 500;
+	//const float costD = 500;
 	int leftCoe = 0, rightCoe = -1;
 	if (num == 1)
 		leftCoe = 1, rightCoe = 0;
@@ -156,19 +169,20 @@ void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num)
 	{
 		float* grad0P = grad[0].ptr<float>(v);
 		float* grad1P = grad[1].ptr<float>(v);
-
+		float* vP = vm.ptr<float>(v);
 		for (int u = 0; u < w_; u++)
 		{
-			float* vP = vm.ptr<float>(v, u);
+			//float* vP = vm.ptr<float>(v, u);
 			for (int d = 0; d < n; d++)
 			{
 				int u0 = u + leftCoe * d;
 				int u1 = u + rightCoe * d;
 				if (u0 >= w_ || u1 < 0)
-					vP[d] = costD;
+					*vP++ = trunc;
 				else
-					vP[d] = abs(grad0P[u0] - grad1P[u1]);
+					*vP++ = min(abs(grad0P[u0] - grad1P[u1]), trunc);
 			}
+
 		}
 	}
 }
@@ -208,12 +222,12 @@ void StereoMatching::grad(vector<Mat>& vm_grad)
 	vector<Mat> grad_y(2);
 	for (int i = 0; i < 2; i++)
 	{
-		grad[i].create(h_, w_, CV_32F);
+		//grad[i].create(h_, w_, CV_32F);
 		grad_y[i].create(h_, w_, CV_32F);
 		//Sobel(I_g[i], grad[i], CV_32F, 1, 0);
 		//Sobel(I_g[i], grad_y[i], CV_32F, 0, 1);
-		calGrad(grad[i], I_g[i]);
-		//calGrad_y(grad_y[i], I_g[i]);
+		//calGrad(grad[i], I_g[i]);
+		calGrad_y(grad_y[i], I_g[i]);
 		saveDispMap<float>(grad[i], to_string(i) + "grad");
 		//saveDispMap<float>(grad_y[i], to_string(i) + "grad_y");
 	}
@@ -222,7 +236,7 @@ void StereoMatching::grad(vector<Mat>& vm_grad)
 	int imgNum = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < imgNum; i++)
 		//calgradvm(vm_grad[i], grad, grad_y, i);
-		calgradvm_1d(vm_grad[i], grad, i);
+		calgradvm_1d(vm_grad[i], grad, i, 2);
 
 	saveFromVm(vm_grad, "grad");
 }
@@ -317,6 +331,32 @@ void StereoMatching::ADCensusCal()
 	saveTime(time, "ADCensus");
 }
 
+void StereoMatching::ADCensusGrad()
+{
+	cout << "start ADCensusGrad cal" << endl;
+	clock_t start = clock();
+	int imgNum = Do_LRConsis ? 2 : 1;
+	vector<Mat> vm_asd(imgNum), vm_census(imgNum), vm_grad(imgNum);
+	for (int num = 0; num < imgNum; num++)
+	{
+		vm_asd[num].create(3, size_vm, CV_32F);
+		vm_census[num].create(3, size_vm, CV_32F);
+		vm_grad[num].create(3, size_vm, CV_32F);
+	}
+	asdCal(vm_asd, "AD", imgNum);
+	//BF(vm_asd, DT);
+	censusCal(vm_census);
+	grad(vm_grad); //xxxx
+	adCensuGradCombine(vm_asd, vm_census, vm_grad);
+	//adCensus(vm_asd, vm_census);
+	cout << "finish ADCensusGrad cal" << endl;
+	clock_t end = clock();
+	clock_t time = end - start;
+	cout << "ADCensus time：" << time << endl;
+	saveTime(time, "ADCensusGrad");
+
+}
+
 void StereoMatching::costCalculate()
 {
 	string::size_type idx;
@@ -344,11 +384,14 @@ void StereoMatching::costCalculate()
 
 	// ZNCC
 	else if (costcalculation == "ZNCC")
-		ZNCC(I_g[0], I_g[1], vm);		
+		ZNCC(I_g[0], I_g[1], vm);
 
 	// adCensus
 	else if (costcalculation == "ADCensus")
 		ADCensusCal();
+
+	else if (costcalculation == "ADCensusGrad")
+		ADCensusGrad();
 
 	// BF 盒式滤波
 	idx = aggregation.find("BF");
@@ -435,7 +478,8 @@ void StereoMatching::dispOptimize()
 		for (int i = 0; i < img_num; i++)
 			gen_dispFromVm(vm[i], DP[i]);
 
-	string name = Do_sgm ? "so" : "wta";
+	string dispCalMethod = param_.Do_vmTop ? "wta_vmTop" : "wta";
+	string name = Do_sgm ? "so" : dispCalMethod;
 #ifdef DEBUG
 	saveFromDisp<short, 0>(DP[0], name);
 	saveFromDisp<short, 1>(DP[1], name);
@@ -473,9 +517,9 @@ void StereoMatching::refine()
 	if (StereoMatching::Do_regionVote)
 	{
 		Dp_res = DP[0].clone();
-		string::size_type idx;
-		idx = aggregation.find("CBCA");
-		if (idx == string::npos)  // 如果没有执行CBCA，则此处需单独生成HVL[0]
+		//string::size_type idx;
+		//idx = aggregation.find("CBCA");
+		if (!param_.has_calArms)  // 如果没有执行CBCA，则此处需单独生成HVL[0]
 		{
 			const uchar L0 = param_.cbca_crossL[0];  // 17
 			const uchar L_out0 = param_.cbca_crossL_out[0];
@@ -487,6 +531,7 @@ void StereoMatching::refine()
 			HVL[0].create(3, HVL_size, CV_16U);
 			int channels = cbca_genArm_isColor ? 3 : 1;
 			calHorVerDis(0, channels, L0, L_out0, C_D, C_D_out, minL);
+			param_.has_calArms = 1;
 		}
 
 		float rv_ratio[] = {0.4, 0.4, 0.4, 0.4};
@@ -575,6 +620,7 @@ void StereoMatching::refine()
 	if (StereoMatching::Do_lastMedianBlur)
 	{
 		medianBlur(DP[0], DP[0], 3);
+		//regionVoteForWholeDispImg(DP[0]);
 #ifdef DEBUG
 		saveFromDisp<short>(DP[0], "mb");
 #endif
@@ -588,188 +634,292 @@ void StereoMatching::refine()
 // 算法描述见论文
 void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 {
-	clock_t start = clock();
-	clock_t time_sum = 0, time_sum2 = 0, time_sum3 = 0, time_sum4 = 0;
-	const int disp_DifThres = 10;
-	const int disp_DifThres2 = 14;
-	const int disp_DifThres3 = 5;
-	const int num_candi = topDisp.size[2];  // 设定的候选视差数加一个实际候选视差指示位
-	map<float, int> dispCost_container;
-	map<float, int>::iterator iter_dispCost;
-	map<int, int> disp__num;
-	map<int, int>::iterator iter_disp_num;
-	map<int, float> disp__cost;
-	map<int, float>::iterator iter_disp_cost;
-	unsigned __int64 step = 0;
-	unsigned __int64 step2 = 0;
-	unsigned __int64 mapsize = 0;
-
-	int neigh_v[] = {0, 0, 1, -1};
-	int neigh_u[] = {-1, 1, 0, 0};
-	for (int v = 0; v < h_; v++)
+	int num_ = topDisp.size[2];
+	if (param_.vmTop_method == 0)
 	{
-		short* disP = disp.ptr<short>(v);
-		for (int u = 0; u < w_; u++)
+		clock_t start = clock();
+		clock_t time_sum = 0, time_sum2 = 0, time_sum3 = 0, time_sum4 = 0;
+		const int disp_DifThres = 10;
+		const int disp_DifThres2 = 14;
+		const int disp_DifThres3 = 5;
+		const int num_candi = topDisp.size[2];  // 设定的候选视差数加一个实际候选视差指示位
+		map<float, int> dispCost_container;
+		map<float, int>::iterator iter_dispCost;
+		map<int, int> disp__num;
+		map<int, int>::iterator iter_disp_num;
+		map<int, float> disp__cost;
+		map<int, float>::iterator iter_disp_cost;
+		unsigned __int64 step = 0;
+		unsigned __int64 step2 = 0;
+		unsigned __int64 mapsize = 0;
+
+		int neigh_v[] = { 0, 0, 1, -1 };
+		int neigh_u[] = { -1, 1, 0, 0 };
+		for (int v = 0; v < h_; v++)
 		{
-			if (u == 0 || v == 0)
-				disP[u] = topDisp.ptr<float>(v, u, 0)[0];
-			else
+			short* disP = disp.ptr<short>(v);
+			for (int u = 0; u < w_; u++)
 			{
-				int n = topDisp.ptr<float>(v, u, num_candi - 1)[0];
-				if (n == 1)
+				if (u == 0 || v == 0)
 					disP[u] = topDisp.ptr<float>(v, u, 0)[0];
-				else if (n > 1)
+				else
 				{
-					int disp_pre1 = disP[u - 1];
-					int disp_pre2 = disp.ptr<short>(v - 1)[u];
-					clock_t start1 = clock();
-					for (int i = 0; i < n; i++)
+					int n = topDisp.ptr<float>(v, u, num_candi - 1)[0];
+					if (n == 1)
+						disP[u] = topDisp.ptr<float>(v, u, 0)[0];
+					else if (n > 1)
 					{
-						int d0 = topDisp.ptr<float>(v, u, i)[0];
-						float c0 = topDisp.ptr<float>(v, u, i)[1];
-						for (int j = i + 1; j < n; j++)
+						int disp_pre1 = disP[u - 1];
+						int disp_pre2 = disp.ptr<short>(v - 1)[u];
+						clock_t start1 = clock();
+						for (int i = 0; i < n; i++)
 						{
-							int d1 = topDisp.ptr<float>(v, u, j)[0];
-							float c1 = topDisp.ptr<float>(v, u, j)[1];
-							if (abs(d0 - d1) < disp_DifThres)
+							int d0 = topDisp.ptr<float>(v, u, i)[0];
+							float c0 = topDisp.ptr<float>(v, u, i)[1];
+							for (int j = i + 1; j < n; j++)
 							{
-								dispCost_container.insert(pair<float, int>(c0, d0));
-								dispCost_container.insert(pair<float, int>(c1, d1));
-								step2++;
-							}
-						}
-					}
-					clock_t end1 = clock();
-					time_sum += (end1 - start1);
-					if (dispCost_container.empty())
-					{
-						clock_t start3 = clock();
-						int difMostSmall1 = numeric_limits<int>::max();
-						int disp1 = -1;
-						int difMostSmall2 = numeric_limits<int>::max();
-						int disp2 = -1;
-						for (int i = 0; i < n; ++i)
-						{
-							int disp__ = topDisp.ptr<float>(v, u, i)[0];
-							int dif1 = abs(disp__ - disp_pre1);
-							if (dif1 < difMostSmall1)
-							{
-								difMostSmall1 = dif1;
-								disp1 = disp__;
-							}
-							int dif2 = abs(disp__ - disp_pre2);
-							if (dif2 < difMostSmall2)
-							{
-								difMostSmall2 = dif2;
-								disp2 = disp__;
-							}
-						}
-						int difMostSmall = min(difMostSmall1, difMostSmall2);
-						int disp = difMostSmall == difMostSmall1 ? disp1 : disp2;
-						if (difMostSmall < disp_DifThres3)
-							disP[u] = disp;
-						else
-							disP[u] = topDisp.ptr<float>(v, u, 0)[0];
-						clock_t end3 = clock();
-						time_sum3 += (end3 - start3);
-					}
-					else
-					{
-						mapsize += dispCost_container.size();
-						clock_t start4 = clock();
-						int difMostSmall = numeric_limits<int>::max();
-						int disp = -1;
-						bool has_find1 = false;
-						bool has_find2 = false;
-						for (iter_dispCost = dispCost_container.begin(); iter_dispCost != dispCost_container.end(); iter_dispCost++)
-						{
-							step++;
-							int disp = iter_dispCost->second;
-							float cost = iter_dispCost->first;
-							disp__num[disp]++;
-							disp__cost[disp] += cost;
-							if (abs(disp - disp_pre1) < disp_DifThres2)
-								has_find1 = true;
-							if (abs(disp - disp_pre2) < disp_DifThres2)
-								has_find2 = true;
-						}
-						clock_t end4 = clock();
-						time_sum4 += (end4 - start4);
-						int start = 2, end = 2;
-						if (has_find1)
-							start = 0;
-						if (has_find2)
-							end = 4;
-						if (has_find1 || has_find2)
-						{
-							clock_t start2 = clock();
-							for (int i = start; i < end; i++)
-							{
-								int v_ = v + neigh_v[i];
-								int u_ = u + neigh_u[i];
-								if (v_ >= 0 && v_ < h_ && u_ >= 0 && u_ < w_)
+								int d1 = topDisp.ptr<float>(v, u, j)[0];
+								float c1 = topDisp.ptr<float>(v, u, j)[1];
+								if (abs(d0 - d1) < disp_DifThres)
 								{
-									int num = topDisp.ptr<float>(v_, u_, num_candi - 1)[0];
-									for (int x = 0; x < num; x++)
+									dispCost_container.insert(pair<float, int>(c0, d0));
+									dispCost_container.insert(pair<float, int>(c1, d1));
+									step2++;
+								}
+							}
+						}
+						clock_t end1 = clock();
+						time_sum += (end1 - start1);
+						if (dispCost_container.empty())
+						{
+							clock_t start3 = clock();
+							int difMostSmall1 = numeric_limits<int>::max();
+							int disp1 = -1;
+							int difMostSmall2 = numeric_limits<int>::max();
+							int disp2 = -1;
+							for (int i = 0; i < n; ++i)
+							{
+								int disp__ = topDisp.ptr<float>(v, u, i)[0];
+								int dif1 = abs(disp__ - disp_pre1);
+								if (dif1 < difMostSmall1)
+								{
+									difMostSmall1 = dif1;
+									disp1 = disp__;
+								}
+								int dif2 = abs(disp__ - disp_pre2);
+								if (dif2 < difMostSmall2)
+								{
+									difMostSmall2 = dif2;
+									disp2 = disp__;
+								}
+							}
+							int difMostSmall = min(difMostSmall1, difMostSmall2);
+							int disp = difMostSmall == difMostSmall1 ? disp1 : disp2;
+							if (difMostSmall < disp_DifThres3)
+								disP[u] = disp;
+							else
+								disP[u] = topDisp.ptr<float>(v, u, 0)[0];
+							clock_t end3 = clock();
+							time_sum3 += (end3 - start3);
+						}
+						else
+						{
+							mapsize += dispCost_container.size();
+							clock_t start4 = clock();
+							int difMostSmall = numeric_limits<int>::max();
+							int disp = -1;
+							bool has_find1 = false;
+							bool has_find2 = false;
+							for (iter_dispCost = dispCost_container.begin(); iter_dispCost != dispCost_container.end(); iter_dispCost++)
+							{
+								step++;
+								int disp = iter_dispCost->second;
+								float cost = iter_dispCost->first;
+								disp__num[disp]++;
+								disp__cost[disp] += cost;
+								if (abs(disp - disp_pre1) < disp_DifThres2)
+									has_find1 = true;
+								if (abs(disp - disp_pre2) < disp_DifThres2)
+									has_find2 = true;
+							}
+							clock_t end4 = clock();
+							time_sum4 += (end4 - start4);
+							int start = 2, end = 2;
+							if (has_find1)
+								start = 0;
+							if (has_find2)
+								end = 4;
+							if (has_find1 || has_find2)
+							{
+								clock_t start2 = clock();
+								for (int i = start; i < end; i++)
+								{
+									int v_ = v + neigh_v[i];
+									int u_ = u + neigh_u[i];
+									if (v_ >= 0 && v_ < h_ && u_ >= 0 && u_ < w_)
 									{
-										int disp = topDisp.ptr<float>(v_, u_, x)[0];
-										float cost = topDisp.ptr<float>(v_, u_, x)[1];
-										if (disp__num.count(disp) == 1)
+										int num = topDisp.ptr<float>(v_, u_, num_candi - 1)[0];
+										for (int x = 0; x < num; x++)
 										{
-											disp__num[disp]++;
-											disp__cost[disp] += cost;
+											int disp = topDisp.ptr<float>(v_, u_, x)[0];
+											float cost = topDisp.ptr<float>(v_, u_, x)[1];
+											if (disp__num.count(disp) == 1)
+											{
+												disp__num[disp]++;
+												disp__cost[disp] += cost;
+											}
 										}
 									}
 								}
-							}
 
-							int disp_A = -1;
-							int num_most = -1;
-							float cost_A = numeric_limits<float>::max();
-							for (iter_disp_num = disp__num.begin(); iter_disp_num != disp__num.end(); iter_disp_num++)
-							{
-								int num = iter_disp_num->second;
-								int disp = iter_disp_num->first;
-								iter_disp_cost = disp__cost.find(disp);
-								if (iter_disp_cost == disp__cost.end())
+								int disp_A = -1;
+								int num_most = -1;
+								float cost_A = numeric_limits<float>::max();
+								for (iter_disp_num = disp__num.begin(); iter_disp_num != disp__num.end(); iter_disp_num++)
 								{
-									cout << "map 错误" << endl;
-									abort();
+									int num = iter_disp_num->second;
+									int disp = iter_disp_num->first;
+									iter_disp_cost = disp__cost.find(disp);
+									if (iter_disp_cost == disp__cost.end())
+									{
+										cout << "map 错误" << endl;
+										abort();
+									}
+									float cost = iter_disp_cost->second;
+									if (num > num_most || num == num_most && cost < cost_A)
+									{
+										num_most = num;
+										cost_A = cost;
+										disp_A = disp;
+									}
 								}
-								float cost = iter_disp_cost->second;
-								if (num > num_most || num == num_most && cost < cost_A)
-								{
-									num_most = num;
-									cost_A = cost;
-									disp_A = disp;
-								}
+								disP[u] = disp_A;
+								disp__cost.clear();
+								disp__num.clear();
+								clock_t end2 = clock();
+								time_sum2 += (end2 - start2);
 							}
-							disP[u] = disp_A;
-							disp__cost.clear();
-							disp__num.clear();
-							clock_t end2 = clock();
-							time_sum2 += (end2 - start2);
+							else
+							{
+								iter_dispCost = dispCost_container.begin();
+								disP[u] = iter_dispCost->second;
+							}
+							dispCost_container.clear();
 						}
-						else
-						{
-							iter_dispCost = dispCost_container.begin();
-							disP[u] = iter_dispCost->second;
-						}
-						dispCost_container.clear();
 					}
 				}
 			}
 		}
+		clock_t end = clock();
+		cout << "time_sum is: " << time_sum << endl;
+		cout << "time_sum2 is: " << time_sum2 << endl;
+		cout << "time_sum3 is: " << time_sum3 << endl;
+		cout << "time_sum4 is: " << time_sum4 << endl;
+		printf("step is: %I64u", step);
+		printf("step2 is: %I64u", step2);
+		printf("mapSize is : %I64u", mapsize);
+		cout << "genDispFromTopVm2 time is: " << end - start << endl;
 	}
-	clock_t end = clock();
-	cout << "time_sum is: " << time_sum << endl;
-	cout << "time_sum2 is: " << time_sum2 << endl;
-	cout << "time_sum3 is: " << time_sum3 << endl;
-	cout << "time_sum4 is: " << time_sum4 << endl;
-	printf("step is: %I64u", step);
-	printf("step2 is: %I64u", step2);
-	printf("mapSize is : %I64u", mapsize);
-	cout << "genDispFromTopVm2 time is: " << end - start << endl;
+	
+	if (param_.vmTop_method == 1)
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			short* dP = disp.ptr<short>(v);
+			float* tP = topDisp.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				int num_d = tP[(num_ - 1) * 2];
+				if (u == 0 || num_d == 1)
+					dP[u] = tP[0];
+				else
+				{
+					int dp_ = -1;
+					short dpV_pre = dP[u - 1];
+					int d_ldis = 10000;
+					float c_ldis = 10000000;
+					for (int d = 0; d < num_d; d++)
+					{
+						int pos = d * 2;
+						int s = abs(dpV_pre - tP[pos]);
+						if (s < 2 && s < d_ldis)
+						{
+							d_ldis = s;
+							dp_ = tP[pos];
+						}
+					}
+					dP[u] = dp_ == -1 ? tP[0] : dp_;
+				}
+				tP += num_ * 2;
+			}
+		}
+	}
+
+	if (param_.vmTop_method == 2)
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			float* tP = topDisp.ptr<float>(v);
+			short* dP = disp.ptr<short>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				int num_t = tP[(num_ - 1) * 2];
+				if (u == 0 || num_t == 1)
+					dP[u] = tP[0];
+				else
+				{
+					int dif_lst_pre = 1000000;
+					int dif_lst_aft = 1000000;
+					int d0 = -1;
+					int d_pre = dP[u - 1];
+					int d1 = -1;
+				
+					for (int n = 0; n < num_t; n++)
+					{
+						int dif = abs(tP[n * 2] - d_pre);
+						if (dif < 2 && dif < dif_lst_pre)
+						{
+							dif_lst_pre = dif;
+							d0 = tP[n * 2];
+						}
+					}
+					if (u < w_ - 1)
+					{
+						int d_aft = tP[num_ * 2];
+						for (int n = 0; n < num_t; n++)
+						{
+							int dif = abs(tP[n * 2] - d_aft);
+							if (dif < 2 && dif < dif_lst_aft)
+							{
+								dif_lst_aft = dif;
+								d1 = tP[n * 2];
+							}
+						}
+					}
+					if (d0 != -1 && d1 == -1)
+						dP[u] = d0;
+					else if (d0 == -1 && d1 != -1)
+						dP[u] = d1;
+					else if (d0 == -1 && d1 == -1)
+						dP[u] = tP[0];
+					else if (d0 != -1 && d1 != -1)
+					{
+						int cdif_pre = 0;
+						int cdif_atf = 0;
+						uchar* cP = I_c[0].ptr<uchar>(v, u);
+						for (int c = 0; c < 3; c++)
+						{
+							cdif_pre += abs(cP[c] - cP[c - 3]);
+							cdif_atf += abs(cP[c] - cP[c + 3]);
+						}
+						dP[u] = cdif_pre <= cdif_atf ? d0 : d1;
+					}
+				}
+				tP += num_ * 2;
+			}
+		}
+
+	}
 }
 
 
@@ -960,19 +1110,8 @@ StereoMatching::StereoMatching(cv::Mat& I1_c, cv::Mat& I2_c, cv::Mat& I1_g, cv::
 	idx = aggregation.find("CBCA");
 	if (idx != string::npos)
 	{
-		HVL_num = 2; // 分别表示左图和右图
-		HVL.resize(HVL_num);
-		//if (param_.cbca_intersect)  // 这个后面再做处理（因为涉及到后面一些代码）
-		HVL_INTERSECTION.resize(HVL_num);
-
-		int HVL_size[] = { h_, w_, 5 };
-		int HVL_IS_size[] = { h_, w_, param_.numDisparities, 5 };
-		for (int i = 0; i < HVL_num; i++)
-		{
-			HVL[i].create(3, HVL_size, CV_16U);
-			//if (param_.cbca_intersect)
-			HVL_INTERSECTION[i].create(4, HVL_IS_size, CV_16U);
-		}
+		initArm();
+		calArms();
 		param_.sgm_P1 = 1.0;
 		param_.sgm_P2 = 3.0;
 	}
@@ -1186,7 +1325,7 @@ void StereoMatching::gen_NCC_vm(cv::Mat& I0, cv::Mat& I1, cv::Mat& E_std0, cv::M
 
 // ad/ssd
 // AOS：0指示AD，1指示SD
-void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS)
+void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS, float trunc)
 {
 	const int channels = param_.SD_AD_channel;
 	Mat I0 = channels == 3 ? I_c[0] : I_g[0];
@@ -1212,7 +1351,7 @@ void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS)
 				int uL = u + d * leftCoefficient;
 				int uR = u + d * rightCoefficient;
 				if (uL >= w_ || uR < 0)
-					vPtr[d] = DEFAULT;
+					vPtr[d] = trunc;
 				else
 				{
 					uchar* lPtr = I0.ptr<uchar>(v, uL);
@@ -1220,7 +1359,7 @@ void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS)
 					float sum = 0;
 					for (int cha = 0; cha < channels; cha++)
 						sum += pow(abs((float)lPtr[cha] - (float)rPtr[cha]), pow_index);
-					vPtr[d] = sum / channels;
+					vPtr[d] = min(sum / channels, trunc);
 				}
 			}
 		}
@@ -1539,6 +1678,8 @@ void StereoMatching::calHorVerDis(int imgNum, int channel, uchar L, uchar L_out,
 	clock_t start = clock();
 	cout << "start cal CrossArm" << endl;
 	Mat I = channel == 3 ? I_c[imgNum].clone() : I_g[imgNum].clone();
+	ximgproc::guidedFilter(I, I, I, 9, 1);
+	//xxxxx
 	//medianBlur(I, I, 3);
 	const int h = I.rows;
 	const int w = I.cols;
@@ -1623,6 +1764,37 @@ void StereoMatching::calHorVerDis(int imgNum, int channel, uchar L, uchar L_out,
 		saveTime(time, "genArmForImg_L");
 	}
 	cout << "finish cal CrossArm" << endl;
+}
+
+void StereoMatching::drawArmForPoint(Mat& HVL, int* v, int* u, int num)
+{
+	Mat I_out = I_c[0].clone();
+	for (int n = 0; n < num; n++)
+	{
+		int v_c = *v++;
+		int u_c = *u++;
+		ushort* lP = HVL.ptr<ushort>(v_c, u_c);
+		uchar* I_outP = I_out.ptr<uchar>(v_c) + 3 * (u_c - lP[0]);
+		for (int u_ = -lP[0]; u_ <= lP[1]; u_++)
+		{
+			I_outP[0] = 34;
+			I_outP[1] = 34;
+			I_outP[2] = 178;
+			I_outP += 3;
+		}
+		I_outP = I_out.ptr<uchar>(v_c - lP[2]) + 3 * u_c;
+		for (int v_ = -lP[2]; v_ <= lP[3]; v_++)
+		{
+			I_outP[0] = 34;
+			I_outP[1] = 34;
+			I_outP[2] = 178;
+			I_outP += 3 * w_;
+		}
+	}
+	string path = param_.savePath; // ******
+	system(("IF NOT EXIST " + path + " (mkdir " + path + ")").c_str());
+	path += "arm.png";
+	imwrite(path, I_out);
 }
 
 static int calColorDif(uchar* p0, uchar* p1, int channels)
@@ -1747,6 +1919,79 @@ void StereoMatching::gen_vm_from2vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 	}
 }
 
+void StereoMatching::gen_vm_from3vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, Mat& vm2, const float ARU0, const float ARU1, float ARU2, int LOR)
+{
+	CV_Assert(vm0.depth() == CV_32F);
+	CV_Assert(vm1.depth() == CV_32F);
+	CV_Assert(combinedVm.depth() == CV_32F);
+	Mat dispMap(h_, w_, CV_16S);
+
+	const int n = param_.numDisparities;
+
+	const float DEFAULT_MC = 2.f * 0.999;
+	const int W_V = param_.W_V;
+	const int W_U = param_.W_U;
+
+	int leftCoefficient = 0, rightCoefficient = 1;
+	if (LOR == 1)
+	{
+		leftCoefficient = 1;
+		rightCoefficient = 0;
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			float* vm0Ptr = vm0.ptr<float>(v, u);
+			float* vm1Ptr = vm1.ptr<float>(v, u);
+			float* vm2Ptr = vm2.ptr<float>(v, u);
+			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
+			for (int d = 0; d < n; d++)
+				combinedVmPtr[d] = 3 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1) - exp(-vm2Ptr[d] / ARU2);
+		}
+	}
+}
+
+void StereoMatching::gen_vm_from2vm_expadpWgt(Mat& HVL, cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float ARU0, const float ARU1, int LOR)
+{
+	CV_Assert(vm0.depth() == CV_32F);
+	CV_Assert(vm1.depth() == CV_32F);
+	CV_Assert(combinedVm.depth() == CV_32F);
+	Mat dispMap(h_, w_, CV_16S);
+
+	const int n = param_.numDisparities;
+
+	const float DEFAULT_MC = 2.f * 0.999;
+	const int W_V = param_.W_V;
+	const int W_U = param_.W_U;
+
+	int leftCoefficient = 0, rightCoefficient = 1;
+	if (LOR == 1)
+	{
+		leftCoefficient = 1;
+		rightCoefficient = 0;
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			short* arm = HVL.ptr<short>(v, u);
+			int shortest = 1000000;
+			for (int dir = 0; dir < 4; dir++)
+			{
+				if (arm[dir] < shortest)
+					shortest = arm[dir];
+			}
+			float a_ = 1 - exp(-0.5 / shortest);
+			float* vm0Ptr = vm0.ptr<float>(v, u);
+			float* vm1Ptr = vm1.ptr<float>(v, u);
+			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
+			for (int d = 0; d < n; d++)
+				combinedVmPtr[d] = a_*(1 - exp(-vm0Ptr[d] / ARU0)) + (1 - a_) * (1 - exp(-vm1Ptr[d] / ARU1));
+		}
+	}
+}
+
 void StereoMatching::gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float weight0, const float weight1, int LOR)
 {
 	CV_Assert(vm0.depth() == CV_32F);
@@ -1779,6 +2024,52 @@ void StereoMatching::gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 				//	combinedVmPtr[d] = DEFAULT_MC;
 				//else
 				combinedVmPtr[d] = vm0Ptr[d] * weight0 + vm1Ptr[d] * weight1;
+			}
+		}
+	}
+}
+
+void StereoMatching::gen_vm_from2vm_add_wgt(cv::Mat& HVL, cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float weight0, const float weight1, int LOR)
+{
+	CV_Assert(vm0.depth() == CV_32F);
+	CV_Assert(vm1.depth() == CV_32F);
+	CV_Assert(combinedVm.depth() == CV_32F);
+	Mat dispMap(h_, w_, CV_16S);
+
+	const int n = param_.numDisparities;
+
+	const int W_V = param_.W_V;
+	const int W_U = param_.W_U;
+
+	int leftCoefficient = 0, rightCoefficient = 1;
+	if (LOR == 1)
+	{
+		leftCoefficient = 1;
+		rightCoefficient = 0;
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			//******
+			float* vm0Ptr = vm0.ptr<float>(v, u);
+			float* vm1Ptr = vm1.ptr<float>(v, u);
+			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
+			short* armP = HVL.ptr<short>(v, u);
+			int arm_smallest = 100000;
+			for (int dir = 0; dir < 4; dir++)
+			{
+				if (armP[dir] < arm_smallest)
+					arm_smallest = armP[dir];
+			}
+			float a = 1 - exp(-0.5 / arm_smallest);
+			for (int d = 0; d < n; d++)
+			{
+				//if (u - W_U < 0 || u + W_U >= w_ || u - d * rightCoefficient - W_U < 0 || u + d * leftCoefficient + W_U >= w_ ||
+				//	v - W_V < 0 || v + W_V >= h_)
+				//	combinedVmPtr[d] = DEFAULT_MC;
+				//else
+				combinedVmPtr[d] = (1 - a) * vm0Ptr[d] * weight0 + a * vm1Ptr[d] * weight1;
 			}
 		}
 	}
@@ -2037,17 +2328,21 @@ void StereoMatching::guideFilter()
 	//vmTrans(vm, guideVm);  // 从3维mat值赋给2维的mat数组
 	const int n = param_.numDisparities;
 	vector<Mat> I(2);
-
 	for (int i = 0; i < 2; i++)
 	{
-		I_c[i].convertTo(I[i], CV_32F);
-		//split(vm[i], guideVm[i]);
-		//for (int d = 0; d < n; d++)
+		I[i] = param_.gf_channel_isColor ? I_c[i].clone() : I_g[i].clone();
+		I[i].convertTo(I[i], CV_32F);
+#ifdef MY_GUIDE
+		split(vm[i], guideVm[i]);
+		for (int d = 0; d < n; d++)
+		{
 			//guideFilterCore(guideVm[i][d], I_g[i], guideVm[i][d], 9, 0.001); // radius: 8, 4 // epsilon: 500, 0.0001
-			//guideVm[i][d] = guideFilterCore_matlab(I[i], guideVm[i][d], 9, 0.0001);
-			//ximgproc::guidedFilter(I[i], guideVm[i][d], guideVm[i][d], 9, 0.0001);
-			ximgproc::guidedFilter(I[i], vm[i], vm[i], param_.gf_r, param_.gf_eps);  // gf_r gf_eps
-		//merge(guideVm[i], vm[i]);
+			guideVm[i][d] = guideFilterCore_matlab(I[i], guideVm[i][d], 9, 0.0001);
+		}
+		merge(guideVm[i], vm[i]);
+#else
+		ximgproc::guidedFilter(I[i], vm[i], vm[i], param_.gf_r, param_.gf_eps);  // gf_r gf_eps
+#endif
 	}
 	//vmTrans(guideVm, vm); // 从2维mat数组赋为3维的mat
 	Mat dispMap(h_, w_, CV_16S);
@@ -2063,14 +2358,13 @@ void StereoMatching::guideFilter()
 		Mat vm_copy = vm[0].clone();
 		selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
 		signCorrectFromTopVm("correctFromTopVmGuide.png", topDisp, DT);
-		genExcelFromTopDisp(topDisp, DT);
+		//genExcelFromTopDisp(topDisp, DT);
 		//genDispFromTopCostVm(topDisp, dispMap2);
 		genDispFromTopCostVm2(topDisp, dispMap2);
 		signDispChange_for2Disp(dispMap, dispMap2, DT, I_mask[1], result);
 		saveDispMap<short>(result, "candidate_Change");
 		saveFromDisp<short>(dispMap2, "guideCand");
 	}
-	saveFromVm(vm, "guide");
 }
 
 void StereoMatching::guideFilterCore(Mat& source, Mat& guided_image, Mat& output, int radius, float epsilon)
@@ -2134,67 +2428,120 @@ Mat StereoMatching::guideFilterCore_matlab(Mat& I, Mat p, int r, float eps)
 	vector<Mat> I_ch;
 	split(I, I_ch);
 
+	Mat tem;
 	Size kerS(2 * r + 1, 2 * r + 1);
-	Mat mean_I_b, mean_I_g, mean_I_r;
-	boxFilter(I_ch[0], mean_I_b, CV_32F, kerS);
-	boxFilter(I_ch[1], mean_I_g, CV_32F, kerS);
-	boxFilter(I_ch[2], mean_I_r, CV_32F, kerS);
-
-	Mat mean_p;
+	Mat mean_I[3], mean_p, mean_Ip[3], cov_Ip[3];
 	boxFilter(p, mean_p, CV_32F, kerS);
-
-	Mat mean_Ip_b, mean_Ip_g, mean_Ip_r;
-	boxFilter(I_ch[0].mul(p), mean_Ip_b, CV_32F, kerS);
-	boxFilter(I_ch[1].mul(p), mean_Ip_g, CV_32F, kerS);
-	boxFilter(I_ch[2].mul(p), mean_Ip_r, CV_32F, kerS);
-
-	Mat cov_Ip_b = mean_Ip_b - mean_I_b.mul(mean_p);
-	Mat cov_Ip_g = mean_Ip_g - mean_I_g.mul(mean_p);
-	Mat cov_Ip_r = mean_Ip_r - mean_I_r.mul(mean_p);
-
-	Mat var_I_bb, var_I_bg, var_I_br, var_I_gg, var_I_gr, var_I_rr;
-
-	boxFilter(I_ch[0].mul(I_ch[0]), var_I_bb, CV_32F, kerS);
-	boxFilter(I_ch[0].mul(I_ch[1]), var_I_bg, CV_32F, kerS);
-	boxFilter(I_ch[0].mul(I_ch[2]), var_I_br, CV_32F, kerS);
-	boxFilter(I_ch[1].mul(I_ch[1]), var_I_gg, CV_32F, kerS);
-	boxFilter(I_ch[1].mul(I_ch[2]), var_I_gr, CV_32F, kerS);
-	boxFilter(I_ch[2].mul(I_ch[2]), var_I_rr, CV_32F, kerS);
-	var_I_bb -= mean_I_b.mul(mean_I_b);
-	var_I_bg -= mean_I_b.mul(mean_I_g);
-	var_I_br -= mean_I_b.mul(mean_I_r);
-	var_I_gg -= mean_I_g.mul(mean_I_g);
-	var_I_gr -= mean_I_g.mul(mean_I_r);
-	var_I_rr -= mean_I_r.mul(mean_I_r);
-
-
-	Mat a = Mat::zeros(h_, w_, CV_32FC3);
-	for (int v = 0; v < h_; v++)
+	for (int c = 0; c < 3; c++)
 	{
-		for (int u = 0; u < w_; u++)
+		boxFilter(I_ch[c], mean_I[c], CV_32F, kerS);
+		multiply(I_ch[c], p, tem);
+		boxFilter(tem, mean_Ip[c], CV_32F, kerS);
+		multiply(mean_I[c], mean_p, tem);
+		subtract(mean_Ip[c], tem, cov_Ip[c]);
+	}
+
+	//  %           br, bg, br
+	//	%   Sigma = gb, gg, gr
+	//	%           rb, rg, rr
+
+	Mat var_I[6];
+	int var_index = 0;
+	for (int c = 0; c < 3; c++)
+	{
+		for (int c_a = c; c_a < 3; c_a++)
 		{
-			Mat sigma = (Mat_<float>(3, 3) << var_I_bb.ptr<float>(v)[u], var_I_bg.ptr<float>(v)[u], var_I_br.ptr<float>(v)[u], var_I_bg.ptr<float>(v)[u], var_I_gg.ptr<float>(v)[u],
-				var_I_gr.ptr <float>(v)[u], var_I_br.ptr<float>(v)[u], var_I_gr.ptr<float>(v)[u],
-				var_I_rr.ptr<float>(v)[u]);
-
-			Mat cov_Ip = (Mat_<float>(1, 3) << cov_Ip_b.ptr<float>(v)[u], cov_Ip_g.ptr<float>(v)[u], cov_Ip_r.ptr<float>(v)[u]);
-
-			Mat cache = cov_Ip * (sigma + eps * Mat::eye(3, 3, CV_32F)).inv();
-			for (int c = 0; c < 3; c++)
-				a.ptr<float>(v, u)[c] = cache.ptr<float>(0)[c];
+			multiply(I_ch[c], I_ch[c_a], tem);
+			boxFilter(tem, var_I[var_index], CV_32F, kerS);
+			multiply(mean_I[c], mean_I[c_a], tem);
+			var_I[var_index] -= tem;
+			var_index++;
 		}
 	}
-	vector<Mat> a_cha;
-	split(a, a_cha);
-	Mat b = mean_p - a_cha[0].mul(mean_I_b) - a_cha[1].mul(mean_I_g) - a_cha[2].mul(mean_I_r);
 
-	Mat mean_a0, mean_a1, mean_a2, mean_b;
-	boxFilter(a_cha[0], mean_a0, CV_32F, kerS);
-	boxFilter(a_cha[1], mean_a1, CV_32F, kerS);
-	boxFilter(a_cha[2], mean_a2, CV_32F, kerS);
+	Mat a[3];
+	for (int c = 0; c < 3; c++)
+		a[c] = Mat::zeros(h_, w_, CV_32F);
+	Mat eps_eye = Mat::eye(3, 3, CV_32F);
+	eps_eye *= eps;
+	for (int v = 0; v < h_; v++)
+	{
+		float* vData[6], * cData[3], * aData[3];
+		for (int n = 0; n < 6; n++)
+			vData[n] = var_I[n].ptr<float>(v);
+		for (int c = 0; c < 3; c++)
+		{
+			cData[c] = cov_Ip[c].ptr<float>(v);
+			aData[c] = a[c].ptr<float>(v);
+		}
+		for (int u = 0; u < w_; u++)
+		{
+#ifdef FAST_INV
+			Mat sigma = (Mat_<float>(3, 3) <<
+				vData[0][u], vData[1][u], vData[2][u],
+				vData[1][u], vData[3][u], vData[4][u],
+				vData[2][u], vData[4][u], vData[5][u]);
+
+			sigma += eps_eye;
+			Mat cov_Ip_13 = (Mat_<float>(1, 3) << cData[0][u], cData[1][u], cData[2][u]);
+			tem = cov_Ip_13 * sigma.inv();
+			float* temP = tem.ptr<float>(0);
+			for (int c = 0; c < 3; c++)
+				aData[c][u] = temP[c];
+#else
+		double c0 = cData[0][u];
+		double c1 = cData[1][u];
+		double c2 = cData[2][u];
+		double a11 = vData[0][u] + eps;
+		double a12 = vData[1][u];
+		double a13 = vData[2][u];
+		double a21 = vData[1][u];
+		double a22 = vData[3][u] + eps;
+		double a23 = vData[4][u];
+		double a31 = vData[2][u];
+		double a32 = vData[4][u];
+		double a33 = vData[5][u] + eps;
+		double DET = a11 * (a33 * a22 - a32 * a23) -
+			a21 * (a33 * a12 - a32 * a13) +
+			a31 * (a23 * a12 - a22 * a13);
+		DET = 1 / DET;
+		aData[0][u] = DET * (
+			c0 * (a33 * a22 - a32 * a23) +
+			c1 * (a31 * a23 - a33 * a21) +
+			c2 * (a32 * a21 - a31 * a22)
+			);
+		aData[1][u] = DET * (
+			c0 * (a32 * a13 - a33 * a12) +
+			c1 * (a33 * a11 - a31 * a13) +
+			c2 * (a31 * a12 - a32 * a11)
+			);
+		aData[2][u] = DET * (
+			c0 * (a23 * a12 - a22 * a13) +
+			c1 * (a21 * a13 - a23 * a11) +
+			c2 * (a22 * a11 - a21 * a12)
+			);
+#endif // FAST_INV
+		}
+	}
+
+	Mat b = mean_p.clone();
+	for (int c = 0; c < 3; c++)
+	{
+		multiply(a[c], mean_I[c], tem);
+		b -= tem;
+	}
+
+	Mat mean_a[3], mean_b;
+	for (int c = 0; c < 3; c++)
+		boxFilter(a[c], mean_a[c], CV_32F, kerS);
 	boxFilter(b, mean_b, CV_32F, kerS);
 
-	Mat q = mean_a0.mul(I_ch[0]) + mean_a1.mul(I_ch[1]) + mean_a2.mul(I_ch[2]) + b;
+	Mat q = mean_b;
+	for (int c = 0; c < 3; c++)
+	{
+		multiply(mean_a[c], I_ch[c], tem);
+		q += tem;
+	}
 	return q;
 }
 
@@ -2244,11 +2591,37 @@ void StereoMatching::adCensus(vector<Mat>& adVm, vector<Mat>& cenVm)
 	Mat dispMap(h_, w_, CV_16S);
 	int imgNum = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < imgNum; i++)
-		gen_vm_from2vm_exp(vm[i], adVm[i], cenVm[i], 10, 30, i);
+	{
+		if (param_.adCensus_useAdpWgt)
+		{
+			if (!param_.has_initArm)
+				initArm();
+			if (!param_.has_calArms)
+				calArms();
+			gen_vm_from2vm_expadpWgt(HVL[i], vm[i], adVm[i], cenVm[i], 10, 30, i);
+		}
+		else
+			gen_vm_from2vm_exp(vm[i], adVm[i], cenVm[i], 10, 30, i);
+	}
 #ifdef DEBUG
 	saveFromVm(vm, "adCensus");
 #endif // DEBUG
 	cout << "adCensus vm generated" << endl;
+}
+
+void StereoMatching::adCensuGradCombine(vector<Mat>& adVm, vector<Mat>& cenVm, vector<Mat>& gradVm)
+{
+	const int n = param_.numDisparities;
+	Mat dispMap(h_, w_, CV_16S);
+	int imgNum = Do_LRConsis ? 2 : 1;
+	for (int i = 0; i < imgNum; i++)
+	{
+		gen_vm_from3vm_exp(vm[i], adVm[i], cenVm[i], gradVm[i], 10, 30, 2, i);
+	}
+#ifdef DEBUG
+	saveFromVm(vm, "adCensusGrad");
+#endif // DEBUG
+	cout << "adCensusGrad vm generated" << endl;
 }
 
 void StereoMatching::adCensusZncc(vector<Mat>& adVm, vector<Mat>& cenVm, vector<Mat>& znccVm)
@@ -2322,6 +2695,12 @@ void StereoMatching::calArms()
 		const uchar L = param_.cbca_crossL[0];  // 17
 		const uchar L_out = param_.cbca_crossL_out[0];  // 34  
 		calHorVerDis(num, channels, L, L_out, C_D, C_D_out, minL);
+		if (num == 0 && object == "teddy")
+		{
+			int v[] = {28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299};
+			int u[] = {381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198};
+			drawArmForPoint(HVL[0], v, u, 12);
+		}
 
 		// 生成左右图每个点在每个视差下的水平、竖直轴（通过交运算），存成一个h*w*n*4的mat
 		if (param_.cbca_intersect)
@@ -2329,8 +2708,27 @@ void StereoMatching::calArms()
 
 		cout << "finish cal horVerArm for img " << num << endl;
 	}
-
+	param_.has_calArms = 1;
 	cout << "HVL generated" << endl;
+}
+
+void StereoMatching::initArm()
+{
+	HVL_num = 2; // 分别表示左图和右图
+	HVL.resize(HVL_num);
+	//if (param_.cbca_intersect)  // 这个后面再做处理（因为涉及到后面一些代码）
+	HVL_INTERSECTION.resize(HVL_num);
+
+	int HVL_size[] = { h_, w_, 5 };
+	int HVL_IS_size[] = { h_, w_, param_.numDisparities, 5 };
+	for (int i = 0; i < HVL_num; i++)
+	{
+		HVL[i].create(3, HVL_size, CV_16U);
+		//if (param_.cbca_intersect)
+		HVL_INTERSECTION[i].create(4, HVL_IS_size, CV_16U);
+	}
+	param_.has_initArm = 1;
+	/////
 }
 
 void StereoMatching::cbca_aggregate()
@@ -2340,7 +2738,8 @@ void StereoMatching::cbca_aggregate()
 	clock_t start = clock();
 
 	// 计算臂长
-	calArms();
+	if (!param_.has_calArms)
+		calArms();
 
 	int imgNum = Do_LRConsis ? 2 : 1;
 
@@ -3050,6 +3449,18 @@ int StereoMatching::regionVoteCore(Mat& Dp, int v, int u, int SThres, float hrat
 	return dp_;
 }
 
+//为视差图中每个点执行区域投票并选择票数最多的点替换目标点
+void StereoMatching::regionVoteForWholeDispImg(Mat& Dp)
+{
+	for (int v = 0; v < h_; v++)
+	{
+		short* dP = Dp.ptr<short>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			dP[u] = cal_histogram_for_HV(Dp, v, u, 0, 0);
+		}
+	}
+}
 /*
  *@searchDepth 表示往左搜寻的深度
  *@numThres 表示找到几个相同的值就不再寻找
@@ -3821,8 +4232,6 @@ void StereoMatching::genExcelFromTopDisp(Mat& topDisp, Mat& DT)
 	int pos = -1;
 	float dif = -1;
 	float ratio = -1;
-	int step = 0;
-	cout << "sdfsdfasdssdsfssssssss" << endl;
 	for (int v = param_.sign_v_range[0]; v < param_.sign_v_range[1]; v++)
 	{
 		opt << "行：" << v << endl;
@@ -3831,15 +4240,8 @@ void StereoMatching::genExcelFromTopDisp(Mat& topDisp, Mat& DT)
 		{
 			if (dtP[u] > 0)
 			{
-				
-
 				opt << "列：" << u << ",";
 				float dtV = dtP[u];
-				if (step <= 30)
-				{
-					cout << dtV << endl;
-					step++;
-				}
 				bool has_find = false;
 				//int num_ = topDisp.ptr<float>(v, u, num - 1)[0];
 				int num_ = param_.vmTop_Num;

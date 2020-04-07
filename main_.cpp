@@ -12,14 +12,13 @@
 using namespace std;
 using namespace cv;
 
-string StereoMatching::costcalculation = "ADCensus";  //grad、gradCensus、TruncAD, ADCensusZNCC, SSD, Census, ZNCC, S-D, mean-Census, symmetric-Census, Census-CBCA, AD-CBCA(Cross-based Cost Aggregation)、ADCensus-CBCA、AWS、AWS-CBCA、BF、ADCensusZNCC
+string StereoMatching::costcalculation = "grad";  //grad、gradCensus、TruncAD, ADCensusZNCC, SSD, Census, ZNCC, S-D, mean-Census, symmetric-Census, Census-CBCA, AD-CBCA(Cross-based Cost Aggregation)、ADCensus-CBCA、AWS、AWS-CBCA、BF、ADCensusZNCC
 string StereoMatching::aggregation = "CBCA"; // CBCA、ASW、guideFilter 
 string StereoMatching::optimization = "";
 string StereoMatching::object = ""; 
 const string StereoMatching::root = "D:\\experiment\\dataset\\middlebury\\"; 
 
 int main(int argc, char* argv[]) {
-
 
 	if (StereoMatching::Do_sgm) 
 	{
@@ -45,7 +44,7 @@ int main(int argc, char* argv[]) {
 	vector<float> disp_reduceCoeffList = {16, 8, 4, 4, 3, 3, 3, 3, 1};
 	vector<int> maxdispList = {15, 19, 59, 59, 85, 85, 85, 85, 248};
 	int objLenth = objectList.size();
-	for (int i = 2; i < 3; i++)
+	for (int i = 0; i < 4; i++)
 	{
 		StereoMatching::object = objectList[i];
 		string object = StereoMatching::object;

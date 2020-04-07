@@ -31,6 +31,9 @@
 #define OMP_PARALLEL_FOR
 #endif
 
+#define FAST_INV
+#define MY_GUIDE
+
 using namespace std;
 using namespace cv;
 
@@ -58,7 +61,7 @@ public:
 	static const bool preMedBlur = 0; // 对彩色图是否进行中值滤波的预处理
 	static const bool discontiAdjust = 1;
 	static const bool Do_dispOptimize = 1;
-	static const bool Do_refine = 1;
+	static const bool Do_refine = 0;
 	static const bool Do_LRConsis = 1;
 	static const bool Do_regionVote = 1;
 	static const bool Do_properIpol = 1;
@@ -104,6 +107,11 @@ public:
 		int census_channel;
 		int censusFunc;
 
+		bool adCensus_useAdpWgt;
+		bool adGrad_useAdpWgt;
+
+		bool has_initArm;
+		bool has_calArms;
 		int Cross_C;
 		int cbcaTrunc_MC_gray;
 		int cbcaTrunc_MC_color;
@@ -131,6 +139,7 @@ public:
 
 		int gf_r;
 		float gf_eps;
+		bool gf_channel_isColor;
 
 		int region_vote_nums;
 		int regVote_SThres;
@@ -145,6 +154,7 @@ public:
 		int cor_ip_dispV;
 
 		bool Do_vmTop;
+		int vmTop_method;
 		int vmTop_Num;
 		float vmTop_thres;
 		int vmTop_thres_dirNum;
@@ -180,6 +190,9 @@ public:
 			SD_AD_channel = 3;
 			census_channel = 1;
 
+			adCensus_useAdpWgt = 0;
+			adGrad_useAdpWgt = 1;
+
 			sgm_scanNum = 4;  //4
 			sgm_P1 = 1.0;  // ssd: 10、 2500、110000、200,  census:10
 			sgm_P2 = 3.0;  // ssd: 120、 30600、16386300、10000,  census:120
@@ -189,12 +202,14 @@ public:
 
 			censusFunc = 0; // 0代表中心像素点比，1代表前一个像素点和后一个比，2代表两者的结合，3代表传统Census后接上最内圈前后比较编码
 
+			has_initArm = 0;
+			has_calArms = 0;
 			// 彩色时Cross_L、Cross_C、cbcaTrunc_MC_color的默认值分别为17，20、60
 			Cross_C = 20;
 			cbcaTrunc_MC_gray = 60;
 			cbcaTrunc_MC_color = 60;
 			cbca_minArmL = 1;
-			cbca_iterationNum = 4;
+			cbca_iterationNum = 2;
 			cbca_ad_channels = 3;
 			cbca_intersect = true;
 			cbca_crossL[0] = 17;  // 17
@@ -218,14 +233,15 @@ public:
 			armLSum = 8;
 			armLSingle = 6;
 
-			gf_r = 13;
+			gf_r = 9;  // 13
 			gf_eps = 0.0001;
+			gf_channel_isColor = true;
 			
-			region_vote_nums = 4;
+			region_vote_nums = 2;
 			regVote_SThres = 20;
 			regVote_hratioThres = 0.4;
 			regVote_type = 0;  // 0代表用HV的，1代表tile的，2代表HV+tlie的
-			interpolateType = 3;  // 0代表只用RV，1代表只用BG，2代表RV+BG, 3代表改进版RV+BG
+			interpolateType = 0;  // 0代表只用RV，1代表只用BG，2代表RV+BG, 3代表改进版RV+BG
 			bgIplDepth = 5;
 			bgIpDir = 2;
 			RVdir = "1Dir";
@@ -234,20 +250,21 @@ public:
 			err_ip_dispV = -50;
 			cor_ip_dispV = -100;
 
-			Do_vmTop = true;
+			Do_vmTop = false;
+			vmTop_method = 0; // 10
 			vmTop_Num = 6;
-			vmTop_thres = 10000; //1.08
+			vmTop_thres = 1.08; //1.08
 			vmTop_thres_dirNum = 8;
 			sign_v_range[0] = 358; // teddy: h-14 venus:91	teddy_GF_1.08_0:91, teddy_GF_1.08_1:358 teddy_CBCA_1.08_0:61,teddy_CBCA_1.08_1:358
 			sign_v_range[1] = 361; // teddy: h-11 venus:92	teddy_GF_1.08_0:94, teddy_GF_1.08_1:361 	teddy_CBCA_1.08_0:64,teddy_CBCA_1.08_0:361
 			sign_u_range[0] = 0; // teddy:0 venus:0			teddy_GF_1.08_0:0
 			sign_u_range[1] = w; // teddy:w	venus:w			teddy_GF_1.08_0:w
 
-			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "CBCA_nlt" + "\\";
-			err_name = "CBCA_nlt.txt";
+			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "grad_y" + "\\";
+			err_name = "grad_y.txt";
 		}  
 	};
-
+  // construct
 	StereoMatching(cv::Mat& I1_c, cv::Mat& I2_c, cv::Mat& I1_g, cv::Mat& I2_g, cv::Mat& DT, cv::Mat& all_mask, cv::Mat& nonocc_mask, cv::Mat& disc_mask, const Parameters& param);
 
 public:
@@ -260,7 +277,7 @@ public:
 
 	void calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, int num);
 
-	void calgradvm_1d(Mat& vm, vector<Mat>& grad, int num);
+	void calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float trunc = 2);
 
 	void calGrad(Mat& grad, Mat& img);
 
@@ -273,6 +290,8 @@ public:
 	void censusCal(vector<Mat>& vm_census);
 
 	void ADCensusCal();
+	
+	void ADCensusGrad();
 
 	int HammingDistance(uint64_t c1, uint64_t c2);
 
@@ -287,7 +306,7 @@ public:
 	void fillSurronding(cv::Mat& D1, cv::Mat& D2);
 
 	// AD、SD
-	void gen_ad_sd_vm(Mat& asd_vm, int LOR, int AOS);
+	void gen_ad_sd_vm(Mat& asd_vm, int LOR, int AOS, float trunc = 1000000);
 
 	void gen_truncAD_vm(Mat& truncAD_vm, int LOR);
 
@@ -903,7 +922,13 @@ public:
 
 	void gen_vm_from2vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float ARU0, const float ARU1, int LOR);
 
+	void gen_vm_from3vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, Mat& vm2, const float ARU0, const float ARU1, float ARU2, int LOR);
+
+	void gen_vm_from2vm_expadpWgt(Mat& HVL, cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float ARU0, const float ARU1, int LOR);
+
 	void gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float ARU0, const float ARU1, int LOR);
+
+	void gen_vm_from2vm_add_wgt(cv::Mat& HVL, cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float weight0, const float weight1, int LOR);
 
 	void gen_adCenZNCC_vm(cv::Mat& adVm, cv::Mat& censVm, cv::Mat& znccVm, cv::Mat& adCenZnccVm, int LOR);
 
@@ -1254,13 +1279,19 @@ public:
 
 	void adCensus(vector<Mat>& vm_ad, vector<Mat>& vm_census);
 
+	void adCensuGradCombine(vector<Mat>& adVm, vector<Mat>& cenVm, vector<Mat>& gradVm);
+
 	void adCensusZncc(vector<Mat>& vm_ad, vector<Mat>& vm_census, vector<Mat>& vm_zncc);
 
 	void cbca_aggregate();
 
+	void initArm();
+
 	void calArms();
 
 	void calHorVerDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL);
+
+	void drawArmForPoint(Mat& HVL, int* v, int* u, int num);
 
 	void calTileNeigh(int imgNum, int channels, cv::Mat& tile_neigh, uchar DIFThres);
 
@@ -1357,6 +1388,8 @@ public:
 
 	void saveTime(int ms, string procedure)
 	{
+		if (_access(param_.savePath.c_str(), 0) == -1)  // 判断文件是否存在
+			createDirectory(param_.savePath.c_str());
 		string addr = param_.savePath + "time.txt";
 		fstream fout;
 		fout.open(addr, ios::app | ios::out);
@@ -1544,18 +1577,19 @@ public:
 			}
 		}
 
-		Mat signImg = biaryImg.clone();
-		for (int v = param_.sign_v_range[0]; v < param_.sign_v_range[1]; v++)
-		{
-			for (int u = param_.sign_u_range[0]; u < param_.sign_u_range[1]; u += 3)
-			{
-				uchar* sP = signImg.ptr<uchar>(v, u);
-				for (int c = 0; c < 3; c++)
-					sP[c] = 125;
-			}
-		}
+		//Mat signImg = biaryImg.clone();
+		//for (int v = param_.sign_v_range[0]; v < param_.sign_v_range[1]; v++)
+		//{
+		//	for (int u = param_.sign_u_range[0]; u < param_.sign_u_range[1]; u += 3)
+		//	{
+		//		uchar* sP = signImg.ptr<uchar>(v, u);
+		//		for (int c = 0; c < 3; c++)
+		//			sP[c] = 125;
+		//	}
+		//}
+		//imwrite(param_.savePath + "sign.png", signImg);  //save biaryImg
+
 		imwrite(addr, biaryImg);  //save biaryImg
-		imwrite(param_.savePath + "sign.png", signImg);  //save biaryImg
 	}
 
 	void errorMap(cv::Mat& DP, cv::Mat& DT, cv::Mat& errMap);
@@ -1629,7 +1663,7 @@ public:
 				}
 			}
 		}
-		string path = param_.savePath;
+		string path = param_.savePath; // ******
 		system(("IF NOT EXIST " + path + " (mkdir " + path + ")").c_str());
 		path += method + ".png";
 		imwrite(path, dispMap);
@@ -1787,6 +1821,7 @@ public:
 	int backgroundInterpolateCore(Mat& Dp, int v, int u);
 	int backgroundInterpolateCore_(Mat& Dp, int v, int u);
 	int regionVoteCore(Mat& Dp, int v, int u, int SThres, float hratioThres);
+	void regionVoteForWholeDispImg(Mat& Dp);
 	int properIpolCore(Mat& Dp, int v, int u);
 	void properIpol(cv::Mat& DP, cv::Mat& I1_c);
 	void BGIpol(cv::Mat& Dp);
