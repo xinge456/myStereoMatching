@@ -12,7 +12,7 @@
 using namespace std;
 using namespace cv;
 
-string StereoMatching::costcalculation = "grad";  //grad°¢gradCensus°¢TruncAD, ADCensusZNCC, SSD, Census, ZNCC, S-D, mean-Census, symmetric-Census, Census-CBCA, AD-CBCA(Cross-based Cost Aggregation)°¢ADCensus-CBCA°¢AWS°¢AWS-CBCA°¢BF°¢ADCensusZNCC
+string StereoMatching::costcalculation = "censusGrad";  //censusGrad,BT, grad°¢TruncAD, ADCensusZNCC, SSD, Census, ZNCC, S-D, mean-Census, symmetric-Census, Census-CBCA, AD-CBCA(Cross-based Cost Aggregation)°¢ADCensus-CBCA°¢AWS°¢AWS-CBCA°¢BF°¢ADCensusZNCC
 string StereoMatching::aggregation = "CBCA"; // CBCA°¢ASW°¢guideFilter 
 string StereoMatching::optimization = "";
 string StereoMatching::object = ""; 
@@ -58,10 +58,18 @@ int main(int argc, char* argv[]) {
 		string nonocc_mask = imgroot + nonocc_maskN;
 		string disc_mask = imgroot + disc_maskN;
 
-		cv::Mat I1 = cv::imread(leftimg, 0);  // ∂¡»Îª“∂»Õº
-		cv::Mat I2 = cv::imread(rightimg, 0);
 		cv::Mat I1_c = cv::imread(leftimg, 1);  // ∂¡»Î≤ …´Õº£®3channel£©
 		cv::Mat I2_c = cv::imread(rightimg, 1);
+
+		cv::Mat I1 = cv::imread(leftimg, 0);  // ∂¡»Îª“∂»Õº
+		cv::Mat I2 = cv::imread(rightimg, 0);
+		//Mat I1, I2;
+		//Mat tem;
+		//cvtColor(I1_c, tem, CV_BGR2RGB);
+		//cvtColor(tem, I1, CV_RGB2GRAY);
+		//cvtColor(I2_c, tem, CV_BGR2RGB);
+		//cvtColor(tem, I2, CV_RGB2GRAY);
+
 		cv::Mat all_maskM = cv::imread(all_mask, 0);  // ∂¡»Î√…∞Ê
 		cv::Mat nonocc_maskM = cv::imread(nonocc_mask, 0);
 		cv::Mat disc_maskM = cv::imread(disc_mask, 0);
@@ -91,7 +99,7 @@ int main(int argc, char* argv[]) {
 
 		StereoMatching::Parameters param(maxdispList[i], I1_c.rows, I1_c.cols);
 		StereoMatching sm(I1_c, I2_c, I1, I2, DT, all_maskM, nonocc_maskM, disc_maskM, param);
-		sm.showParams();
+		//sm.showParams();
 		sm.pipeline();
 		cout << "complete " << object << endl;
 		cout << "*********************" << endl;

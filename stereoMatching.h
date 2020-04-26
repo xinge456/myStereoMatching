@@ -31,7 +31,7 @@
 #define OMP_PARALLEL_FOR
 #endif
 
-#define FAST_INV
+//#define FAST_INV
 #define MY_GUIDE
 
 using namespace std;
@@ -106,12 +106,18 @@ public:
 		int SD_AD_channel;
 		int census_channel;
 		int censusFunc;
+		int census_W[2];
+		bool is_censusNorm;
+		bool is_adNorm;
+		bool is_gradNorm;
 
 		bool adCensus_useAdpWgt;
 		bool adGrad_useAdpWgt;
 
 		bool has_initArm;
 		bool has_calArms;
+		bool has_initTileArm;
+		bool has_calTileArms;
 		int Cross_C;
 		int cbcaTrunc_MC_gray;
 		int cbcaTrunc_MC_color;
@@ -136,6 +142,7 @@ public:
 		int armLSingle;
 		bool cbca_do_costCompare;
 		int	cbca_armSLimit;
+		bool doGF_bef_calArm;
 
 		int gf_r;
 		float gf_eps;
@@ -166,8 +173,8 @@ public:
 
 		Parameters(int maxDisp, int h, int w)
 		{
-			W_U = 4;
-			W_V = 3;
+			W_U = 2;
+			W_V = 2;
 			ChooseSmall = true;
 			numDisparities = maxDisp + 1;
 			uniquenessRatio_2small = 0.95;
@@ -189,9 +196,11 @@ public:
 
 			SD_AD_channel = 3;
 			census_channel = 1;
+			census_W[0] = 2;
+			census_W[1] = 5;
 
-			adCensus_useAdpWgt = 0;
-			adGrad_useAdpWgt = 1;
+			adCensus_useAdpWgt = 1;
+			adGrad_useAdpWgt = 0;
 
 			sgm_scanNum = 4;  //4
 			sgm_P1 = 1.0;  // ssd: 10、 2500、110000、200,  census:10
@@ -199,11 +208,17 @@ public:
 			sgm_corDifThres = 15;
 			sgm_reduCoeffi1 = 4;
 			sgm_reduCoeffi2 = 10;
-
-			censusFunc = 0; // 0代表中心像素点比，1代表前一个像素点和后一个比，2代表两者的结合，3代表传统Census后接上最内圈前后比较编码
+		
+			censusFunc = 3; // 0代表中心像素点比，1代表前一个像素点和后一个比，2代表两者的结合，3代表传统Census后接上最内圈前后比较编码
+			is_censusNorm = 0;
+			is_adNorm = 0;
+			is_gradNorm = 0;
 
 			has_initArm = 0;
 			has_calArms = 0;
+
+			has_initTileArm = 0;
+			has_calTileArms = 0;
 			// 彩色时Cross_L、Cross_C、cbcaTrunc_MC_color的默认值分别为17，20、60
 			Cross_C = 20;
 			cbcaTrunc_MC_gray = 60;
@@ -232,6 +247,8 @@ public:
 			cobineCrossFWType = 4; // 1代表根据交的臂长总和来选择，3代表根据交的面积来选, 4代表通过交的总臂长和单个臂长来选
 			armLSum = 8;
 			armLSingle = 6;
+			doGF_bef_calArm = false;
+
 
 			gf_r = 9;  // 13
 			gf_eps = 0.0001;
@@ -260,8 +277,8 @@ public:
 			sign_u_range[0] = 0; // teddy:0 venus:0			teddy_GF_1.08_0:0
 			sign_u_range[1] = w; // teddy:w	venus:w			teddy_GF_1.08_0:w
 
-			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "grad_y" + "\\";
-			err_name = "grad_y.txt";
+			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "census(7_9)_GF" + "\\";
+			err_name = "census(7_9)_GF.txt";
 		}  
 	};
   // construct
@@ -269,13 +286,23 @@ public:
 
 public:
 
-	void gradCensus(vector<Mat>& vm);
+	void censusGrad(vector<Mat>& vm);
 
 	void adGrad(vector<Mat>& vm);
 
-	void asdCal(vector<Mat>& vm_asd, string method, int imgNum);
+	void asdCal(vector<Mat>& vm_asd, string method, int imgNum, float Trunc);
 
-	void calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, int num);
+	void bt(vector<Mat>& vm);
+
+	void bt_color(vector<Mat>& vm);
+
+	void calCostForBT(Mat& vm, vector<Mat>& grayNei, vector<Mat>& I_g, int LOR);
+
+	void calNeiMaxMin(vector<Mat>& grayNei);
+
+	void calNeiMaxMin_color(vector<Mat>& colorNei);
+
+	void calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, int num, float Trunc);
 
 	void calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float trunc = 2);
 
@@ -283,11 +310,13 @@ public:
 
 	void calGrad_y(Mat& grad, Mat& img);
 
-	void grad(vector<Mat>& vm_grad);
+	void grad(vector<Mat>& vm_grad, float Trunc);
+
+	void combineXYGrad(Mat& grad_x, Mat& grad_y, Mat& grad_xy);
 
 	void truncAD(vector<Mat>& vm);
 
-	void censusCal(vector<Mat>& vm_census);
+	void censusCal(vector<Mat>& vm_census, float truncRatio);
 
 	void ADCensusCal();
 	
@@ -523,11 +552,19 @@ public:
 		}
 	}
 
+	template <typename T>
 	void genCensusCode(vector<Mat>& I, vector<Mat>& census, int R_V, int R_U)
 	{
 		vector<Mat> I_B(2);
+		vector<Mat> I_cache(2);
+		//Mat I_cache;
 		for (int i = 0; i < 2; i++)
+		{
 			copyMakeBorder(I[i], I_B[i], R_V, R_V, R_U, R_U, BORDER_REFLECT_101);
+			//ximgproc::guidedFilter(I_B[i], I_B[i], I_B[i], R_V, 10);
+			//bilateralFilter(I_B[i], I_cache[i], 7, 10, 10);
+			//I_B[i] = I_cache[i];
+		}
 		const int channels = I[0].channels();
 		//OMP_PARALLEL_FOR
 		for (int num = 0; num < 2; num++)
@@ -536,7 +573,7 @@ public:
 			{
 				for (int u = 0; u < w_; u++)
 				{
-					uchar* IP = I_B[num].ptr<uchar>(v + R_V, u + R_U);
+					T* IP = I_B[num].ptr<T>(v + R_V, u + R_U);
 					uint64_t* censP = census[num].ptr<uint64_t>(v, u);
 					uint64_t cs = 0;
 					int step = 0, dep = 0;
@@ -554,7 +591,7 @@ public:
 									dep++;
 								}
 								cs <<= 1;
-								if (IP[c] - I_B[num].ptr<uchar>(v + R_V + dv, u + R_U + du)[c] < 0)
+								if (IP[c] - I_B[num].ptr<T>(v + R_V + dv, u + R_U + du)[c] < 0)
 									cs++;
 								step++;
 							}
@@ -802,26 +839,25 @@ public:
 							if (pre[c] - aft[c] < 0)
 								cs++;
 							step++;
-
 						}
 					}
 					if (step > 0)
 						censP[dep] = cs;
 				}
 			}
-
 		}
 	}
 
-	void gen_cenVM_XOR(vector<Mat>& census, Mat& cenVm, int LOR = 0)
+	void gen_cenVM_XOR(vector<Mat>& census, Mat& cenVm, int codeLength, float truncRat, int LOR = 0)
 	{
+		float DEFAULT = codeLength * truncRat;
+		float norm = param_.is_censusNorm ? 1 : DEFAULT; // 1
+
 		CV_Assert(census[0].type() == CV_64F);
-		CV_Assert(cenVm.type() == CV_32F);
+		CV_Assert(cenVm.depth() == CV_32F);
 		memset(cenVm.data, 0, (uint64_t)h_ * w_ * param_.numDisparities * sizeof(float));
 		const int disp = param_.numDisparities;
-		const int W_V = param_.W_V;
-		const int W_U = param_.W_U;
-		const float DEFAULT = (W_U * 2 + 1) * (W_V * 2 + 1) * param_.census_channel;
+
 		const int varNum = census[0].size[2]; 
 		//const int varNum = 1; 
 
@@ -842,18 +878,184 @@ public:
 					int lp = u + d * leftCoefficient;
 					int rp = u - d * rightCoefficient;
 					if (lp >= w_ || rp < 0)
-						cenvmP[d] = DEFAULT;
+						cenvmP[d] = norm;
 					else
 					{
+						float cost = 0;
 						for (int varN = 0; varN < varNum; varN++)
 						{
-							cenvmP[d] += static_cast<float>(HammingDistance(census[0].ptr<uint64_t>(v, lp)[varN], census[1].ptr<uint64_t>(v, rp)[varN]));
+							cost += static_cast<float>(HammingDistance(census[0].ptr<uint64_t>(v, lp)[varN], census[1].ptr<uint64_t>(v, rp)[varN]));
+						}
+						cenvmP[d] = min(cost, DEFAULT);
+						if (param_.is_censusNorm)
+							cenvmP[d] /= DEFAULT;
+					}
+				}
+			}
+		}
+	}
+
+	void gen_cenVM_XOR_From2Code(vector<vector<Mat>>& census, Mat& cenVm, int codeLength[], int varNum[], float truncRatio, int LOR = 0)
+	{
+		CV_Assert(census[0][0].depth() == CV_64F);
+		CV_Assert(census[1][1].depth() == CV_64F);
+		CV_Assert(cenVm.depth() == CV_32F);
+		//memset(cenVm.data, 0, (uint64_t)h_ * w_ * param_.numDisparities * sizeof(float));
+		const int disp = param_.numDisparities;
+
+		float DEFAULT[2] = {codeLength[0] * truncRatio, codeLength[1] * truncRatio};
+
+		int leftCoefficient = 0, rightCoefficient = 1;
+		if (LOR == 1)
+		{
+			leftCoefficient = 1;
+			rightCoefficient = 0;
+		}
+
+		Mat I;
+		I_g[LOR].convertTo(I, CV_32F);
+		int size[] = { 5, 15 };
+		vector<Mat> var(2);
+		for (int i = 0; i < 2; i++)
+		{
+			Mat I_mean, I_2_mean, tem;
+			boxFilter(I, I_mean, CV_32F, Size(size[i], size[i]));
+			multiply(I, I, tem);
+			boxFilter(tem, I_2_mean, CV_32F, Size(size[i], size[i]));
+			multiply(I_mean, I_mean, tem);
+			subtract(I_2_mean, tem, var[i]);
+			//convertScaleAbs(res[i], res[i]);
+		}
+
+
+
+		for (int v = 0; v < h_; v++)
+		{
+			float* var0P = var[0].ptr<float>(v);
+			float* var1P = var[1].ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				float var0 = var0P[u];
+				float var1 = var1P[u];
+				float ratio = var1 / (var0 + var1);
+				float dif = var0 - var1;
+				bool isBig = true;
+				if (dif > 0 && dif / var1 > 0.7)
+				{
+					isBig = false;
+				}
+
+				short* arm = HVL[LOR].ptr<short>(v, u);
+				short* armTile = tileCrossL[LOR].ptr<short>(v, u);
+
+				int shortest = 100000;
+				for (int dir = 0; dir < 4; dir++)
+				{
+					if (arm[dir] < shortest)
+						shortest = arm[dir];
+					//if (armTile[dir] < shortest)
+					//	shortest = armTile[dir];
+				}
+				float numerator = -1.5;
+				float a = 1 - exp(numerator / (shortest + 1));
+				float b = 1 - a;
+				float* cenvmP = cenVm.ptr<float>(v, u);
+				{
+					for (int d = 0; d < disp; d++)
+					{
+						int lp = u + d * leftCoefficient;
+						int rp = u - d * rightCoefficient;
+						if (lp >= w_ || rp < 0)
+							cenvmP[d] = 1;
+						else
+						{
+							float cost[2] = {0, 0};
+							for (int i = 0; i < 2; i++)
+							{
+								float ct = 0;
+								for (int varN = 0; varN < varNum[i]; varN++)
+								{
+									ct += static_cast<float>(HammingDistance(census[i][0].ptr<uint64_t>(v, lp)[varN], census[i][1].ptr<uint64_t>(v, rp)[varN]));
+								}
+								ct = min(ct, DEFAULT[i]);
+								cost[i] = ct / DEFAULT[i];
+							}
+							//cenvmP[d] = a * cost[0] + b * cost[1];
+							
+							//cenvmP[d] = ratio * cost[0] + (1 - ratio) * cost[1];
+							//cenvmP[d] = isBig ? cost[0] : cost[1];
+							cenvmP[d] = cost[0];
 						}
 					}
 				}
 			}
 		}
 	}
+	
+	void gen_cenVM_XOR_From2Code_tem(Mat grad, vector<vector<Mat>>& census, Mat& cenVm, int codeLength[], int varNum[], int LOR = 0)
+	{
+		CV_Assert(census[0][0].depth() == CV_64F);
+		CV_Assert(census[1][1].depth() == CV_64F);
+		CV_Assert(cenVm.depth() == CV_32F);
+		//memset(cenVm.data, 0, (uint64_t)h_ * w_ * param_.numDisparities * sizeof(float));
+		const int disp = param_.numDisparities;
+
+		int leftCoefficient = 0, rightCoefficient = 1;
+		if (LOR == 1)
+		{
+			leftCoefficient = 1;
+			rightCoefficient = 0;
+		}
+
+		int thres = 10;
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				short* arm = HVL[LOR].ptr<short>(v, u);
+				short* armTile = tileCrossL[LOR].ptr<short>(v, u);
+				float gradV = grad.ptr<float>(v)[u];
+				int shortest = 10000;
+				for (int dir = 0; dir < 4; dir++)
+				{
+					if (arm[dir] < shortest)
+						shortest = arm[dir];
+					//if (armTile[dir] < shortest)
+					//	shortest = armTile[dir];
+				}
+				//float a = 1 - exp(-1.5 / (shortest + 1));
+				//float b = 1 - a;				
+				float a = 1 - exp(-0.1 / (gradV + 1));
+				float b = 1 - a;
+				float* cenvmP = cenVm.ptr<float>(v, u);
+				{
+					for (int d = 0; d < disp; d++)
+					{
+						int lp = u + d * leftCoefficient;
+						int rp = u - d * rightCoefficient;
+						if (lp >= w_ || rp < 0)
+							cenvmP[d] = 1;
+						else
+						{
+							float cost[2] = { 0, 0 };
+							for (int i = 0; i < 2; i++)
+							{
+								for (int varN = 0; varN < varNum[i]; varN++)
+								{
+									cost[i] += static_cast<float>(HammingDistance(census[i][0].ptr<uint64_t>(v, lp)[varN], census[i][1].ptr<uint64_t>(v, rp)[varN]));
+								}
+								cost[i] /= codeLength[i];
+							}
+							//cenvmP[d] = shortest < thres ? cost[0] : cost[1];
+							//cenvmP[d] = 0.7 * cost[0] + 0.3 * cost[1];
+							cenvmP[d] = b * cost[0] + a * cost[1];
+						}
+					}
+				}
+			}
+		}
+	}
+
 
 	void genCensus(cv::Mat& img, cv::Mat& censusCode, int R_V, int R_U);
 	
@@ -924,9 +1126,13 @@ public:
 
 	void gen_vm_from3vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, Mat& vm2, const float ARU0, const float ARU1, float ARU2, int LOR);
 
+	void gen_vm_from3vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, cv::Mat& vm2, int LOR);
+
 	void gen_vm_from2vm_expadpWgt(Mat& HVL, cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float ARU0, const float ARU1, int LOR);
 
-	void gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float ARU0, const float ARU1, int LOR);
+	void gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, int LOR);
+
+	void gen_vm_from2vm_fixWgt(Mat& vm0, float wgt0, Mat& vm1, float wgt1, Mat& dst);
 
 	void gen_vm_from2vm_add_wgt(cv::Mat& HVL, cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float weight0, const float weight1, int LOR);
 
@@ -1286,10 +1492,14 @@ public:
 	void cbca_aggregate();
 
 	void initArm();
+	void initTileArm();
 
 	void calArms();
+	void calTileArms();
 
 	void calHorVerDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL);
+
+	void calTileDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL);
 
 	void drawArmForPoint(Mat& HVL, int* v, int* u, int num);
 
@@ -2230,6 +2440,7 @@ private:
 	int size_vm[3];
 
 	int HVL_num;
+	int TileL_num;
 	vector<Mat> HVL;
 	vector<Mat> HVL_INTERSECTION;
 	vector<Mat> tileCrossL;

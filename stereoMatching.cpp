@@ -20,11 +20,11 @@
 #define OMP_PARALLEL_FOR
 #endif
 
-#define DEBUG
+//#define DEBUG
 
 using namespace std;
 
-void StereoMatching::gradCensus(vector<Mat>& vm)
+void StereoMatching::censusGrad(vector<Mat>& vm)
 {
 	vector<Mat> gradVm(2);
 	vector<Mat> censusVm(2);
@@ -33,12 +33,22 @@ void StereoMatching::gradCensus(vector<Mat>& vm)
 		gradVm[i].create(3, size_vm, CV_32F);
 		censusVm[i].create(3, size_vm, CV_32F);
 	}
-	grad(gradVm);
-	censusCal(censusVm);
+	grad(gradVm, 10000);
+	censusCal(censusVm, 1);
+
+	if (!param_.has_initArm)
+		initArm();
+	if (!param_.has_calArms)
+		calArms();
+
 	int img_num = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < img_num; i++)
-		gen_vm_from2vm_exp(vm[i], gradVm[i], censusVm[i], 20, 30, i);
-	saveFromVm(vm, "gradCensus");
+	{
+		gen_vm_from2vm_exp(vm[i], censusVm[i], gradVm[i], 10, 1, i);
+		//gen_vm_from2vm_add(vm[i], censusVm[i], gradVm[i], i);
+	}
+		
+	saveFromVm(vm, "censusGrad");
 }
 
 void StereoMatching::adGrad(vector<Mat>& vm)
@@ -52,7 +62,7 @@ void StereoMatching::adGrad(vector<Mat>& vm)
 	}
 	for (int i = 0; i < 2; i++)
 		gen_ad_sd_vm(adVm[i], i, 0, 20);
-	grad(gradVm);
+	grad(gradVm, 2);
 	for (int i = 0; i < 2; i++)
 	{
 		if (param_.adGrad_useAdpWgt)
@@ -64,20 +74,21 @@ void StereoMatching::adGrad(vector<Mat>& vm)
 			gen_vm_from2vm_add_wgt(HVL[i], vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
 		}
 		else
-			gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
-	}
-		
+			//addWeighted(adVm[i], 0.11, gradVm[i], 1 - 0.11, 0, vm[i]);
+			gen_vm_from2vm_fixWgt(adVm[i], 0.11, gradVm[i], 1 - 0.11, vm[i]);
+			//gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
+	}	
 	saveFromVm(vm, "adGrad");
 }
 
-void StereoMatching::asdCal(vector<Mat>& vm_asd, string method, int imgNum)
+void StereoMatching::asdCal(vector<Mat>& vm_asd, string method, int imgNum, float Trunc)
 {
 	cout << "\n" << endl;
 	cout << "start " << method << " calculation" << endl;
 	clock_t start = clock();
 	int type = method == "AD" ? 0 : 1;
 	for (int i = 0; i < imgNum; i++)
-		gen_ad_sd_vm(vm_asd[i], i, type);
+		gen_ad_sd_vm(vm_asd[i], i, type, Trunc);
 	clock_t end = clock();
 	clock_t time = end - start;
 	cout << time << endl;
@@ -88,50 +99,311 @@ void StereoMatching::asdCal(vector<Mat>& vm_asd, string method, int imgNum)
 	cout << "AD vm generated" << endl;
 }
 
+void StereoMatching::bt(vector<Mat>& vm)
+{
+	cout << "\n" << endl;
+	cout << "start " << "BT" << " calculation" << endl;
+	clock_t start = clock();
+
+	vector<Mat> grayNei(2);
+	for (int i = 0; i < 2; i++)
+		grayNei[i].create(h_, w_, CV_32FC2);
+	calNeiMaxMin(grayNei);
+	int n = Do_LRConsis ? 2 : 1;
+	for (int i = 0; i < n; i++)
+	{
+		calCostForBT(vm[i], grayNei, I_g, i);
+	}
+
+	clock_t end = clock();
+	clock_t time = end - start;
+	cout << time << endl;
+#ifdef DEBUG
+	saveTime(time, "bt");
+	saveFromVm(vm, "bt");
+#endif
+	cout << "bt vm generated" << endl;
+}
+
+void StereoMatching::bt_color(vector<Mat>& vm)
+{
+	cout << "\n" << endl;
+	cout << "start " << "BT" << " calculation" << endl;
+	clock_t start = clock();
+
+	vector<Mat> colorNei(2);
+	for (int i = 0; i < 2; i++)
+		colorNei[i].create(h_, w_, CV_32FC(6));
+	calNeiMaxMin_color(colorNei);
+	int n = Do_LRConsis ? 2 : 1;
+	for (int i = 0; i < n; i++)
+	{
+		calCostForBT(vm[i], colorNei, I_c, i);
+	}
+
+	clock_t end = clock();
+	clock_t time = end - start;
+	cout << time << endl;
+#ifdef DEBUG
+	saveTime(time, "bt");
+	saveFromVm(vm, "bt");
+#endif
+	cout << "bt vm generated" << endl;
+}
+
+void StereoMatching::calCostForBT(Mat& vm, vector<Mat>& grayNei, vector<Mat>& I_g, int LOR)
+{
+	const int n = param_.numDisparities;
+	const int cha = I_g[0].channels();
+	float trunc = 20;
+
+	int cofL = LOR == 0 ? 0 : 1;
+	int cofR = LOR == 0 ? -1 : 0;
+	for (int v = 0; v < h_; v++)
+	{
+		float* vP = vm.ptr<float>(v);
+		float* nLP = grayNei[0].ptr<float>(v);
+		float* nRP = grayNei[1].ptr<float>(v);
+		uchar* iLP = I_g[0].ptr<uchar>(v);
+		uchar* iRP = I_g[1].ptr<uchar>(v);
+
+		for (int u = 0; u < w_; u++)
+		{
+			for (int d = 0; d < n; d++)
+			{
+				int lP = u + d * cofL;
+				int rP = u + d * cofR;
+				if (lP < w_ && rP >= 0)
+				{
+					float sum = 0;
+					lP *= cha;
+					rP *= cha;
+					for (int c = 0; c < cha; c++)
+					{
+						uchar iLV = iLP[lP + c];
+						uchar iRV = iRP[rP + c];
+						int lsft = d * cofL * 2 * cha + c * 2;
+						int rsft = d * cofR * 2 * cha + c * 2;
+						float v0 = max(0.0f, max(nRP[rsft] - iLV, iLV - nRP[rsft + 1]));
+						float v1 = max(0.0f, max(nLP[lsft] - iRV, iRV - nLP[lsft + 1]));
+						sum += min(v0, v1);
+					}
+					*vP++ = min(sum / cha, trunc);
+					//uchar iLV = iLP[lP];
+					//uchar iRV = iRP[rP];
+					//int lsft = d * cofL * 2;
+					//int rsft = d * cofR * 2;
+					//float v0 = max(0.0f, max(nRP[rsft] - iLV, iLV - nRP[rsft + 1]));
+					//float v1 = max(0.0f, max(nLP[lsft] - iRV, iRV - nLP[lsft + 1]));
+					//*vP++ = min(v0, v1);
+				}
+				else
+					*vP++ = trunc;
+			}
+			nLP += 2 * cha;
+			nRP += 2 * cha;
+		}
+	}
+}
+
+void StereoMatching::calNeiMaxMin(vector<Mat>& grayNei)
+{
+	for (int i = 0; i < 2; i++)
+	{
+		Mat I = I_g[i];
+		Mat grayN = grayNei[i];
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* Ip = I.ptr<uchar>(v);
+			float* nP = grayN.ptr<float>(v);
+			float Il = Ip[0];
+			float Ir = 0.5 * (Ip[1] + Ip[0]);
+			nP[0] = min(Il, Ir);
+			nP[1] = max(Il, Ir);
+			nP += 2;
+			for (int u = 1; u < w_ - 1; u++)
+			{
+				float Iv = Ip[u];
+				Il = 0.5 * (Ip[u - 1] + Iv);
+				Ir = 0.5 * (Ip[u + 1] + Iv);
+				nP[0] = min(Iv, min(Il, Ir));
+				nP[1] = max(Iv, max(Il, Ir));
+				nP += 2;
+			}
+			Il = 0.5 * (Ip[w_ - 2] + Ip[w_ - 1]);
+			Ir = Ip[w_ - 1];
+			nP[0] = min(Il, Ir);
+			nP[1] = max(Il, Ir);
+		}
+	}
+}
+
+void StereoMatching::calNeiMaxMin_color(vector<Mat>& colorNei)
+{
+	for (int i = 0; i < 2; i++)
+	{
+		Mat I = I_c[i];
+		Mat colorN = colorNei[i];
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* Ip = I.ptr<uchar>(v);
+			float* nP = colorN.ptr<float>(v);
+			for (int c = 0; c < 3; c++)
+			{
+				float Il = Ip[c];
+				float Ir = 0.5 * (Ip[c] + Ip[c + 3]);
+				*nP++ = min(Il, Ir);
+				*nP++ = max(Il, Ir);
+			}
+			for (int u = 1; u < w_ - 1; u++)
+			{
+				int pos = u * 3;
+				for (int c = 0; c < 3; c++)
+				{
+					float Iv = Ip[pos + c];
+					float Il = 0.5 * (Ip[pos - 3 + c] + Iv);
+					float Ir = 0.5 * (Ip[pos + 3 + c] + Iv);
+					*nP++ = min(Il, Ir);
+					*nP++ = max(Il, Ir);
+				}
+			}
+			for (int c = 0; c < 3; c++)
+			{
+				int pos = (w_ - 2) * 3;
+				float Il = 0.5 * (Ip[pos + c] + Ip[pos + 3 + c]);
+				float Ir = Ip[pos + 3 + c];
+				*nP++ = min(Il, Ir);
+				*nP++ = max(Il, Ir);
+			}
+		}
+	}
+}
+
 // 计算x向梯度:(I(u+1) - I(u-1))/2 
 void StereoMatching::calGrad(Mat& grad, Mat& img)
 {
-	for (int v = 0; v < h_; v++)
+	int channels = img.channels();
+	if (channels == 1)
 	{
-		uchar* iP = img.ptr<uchar>(v);
-		float* gP = grad.ptr<float>(v);
-		for (int u = 0; u < w_; u++)
+		for (int v = 0; v < h_; v++)
 		{
-			if (u > 0 && u < w_ - 1)
-				gP[u] = ((float)iP[u + 1] - iP[u - 1]) / 2;
-			else if (u == 0)
-				gP[u] = iP[1] - iP[0];
-			else if (u == w_ - 1)
-				gP[u] = iP[w_ - 1] - iP[w_ - 2];
+			uchar* iP = img.ptr<uchar>(v);
+			float* gP = grad.ptr<float>(v);
+			for (int u = 1; u < w_ - 1; u++)
+			{
+				for (int c = 0; c < 3; c++)
+				{
+					gP[u] = 0.5 * (iP[u + 1] - iP[u - 1]);
+				}
+			}
+			gP[0] = iP[1] - iP[0];
+			gP[w_ - 1] = iP[w_ - 1] - iP[w_ - 2];
+		}
+	}
+	else
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* iP = img.ptr<uchar>(v);
+			float* gP = grad.ptr<float>(v);
+			for (int u = 1; u < w_ - 1; u++)
+			{
+				float grad = 0;
+				int aft_P = (u + 1) * 3;
+				int pre_P = (u - 1) * 3;
+				for (int c = 0; c < 3; c++)
+					grad += 0.5 * (iP[aft_P + c] - iP[pre_P + c]);
+				gP[u] = 0.333333 * grad;
+			}
+			int aft_P = (w_ - 1) * 3;
+			for (int c = 0; c < 3; c++)
+			{
+				gP[0] += iP[c + 3] - iP[c];
+				gP[w_ - 1] += iP[aft_P + c] - iP[aft_P - (3 - c)];
+			}
+			gP[0] *= 0.333333;
+			gP[w_ - 1] *= 0.333333;
 		}
 	}
 }
+
 
 void StereoMatching::calGrad_y(Mat& grad, Mat& img)
 {
-	for (int v = 0; v < h_; v++)
+	int channels = img.channels();
+	if (channels == 1)
 	{
-		uchar* iP = img.ptr<uchar>(v);
-		float* gP = grad.ptr<float>(v);
+		float* gP = NULL;
+		uchar* iP_pre = NULL;
+		uchar* iP_aft = NULL;
+		for (int v = 1; v < h_ - 1; v++)
+		{
+			iP_pre = img.ptr<uchar>(v - 1);
+			iP_aft = img.ptr<uchar>(v + 1);
+			gP = grad.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				gP[u] = 0.5 * (iP_aft[u] - iP_pre[u]);
+				//gP[u] = abs(iP[u + 1] - iP[u]) + abs(img.ptr<uchar>(v + 1)[u] - iP[u]);
+				//gP[u] = sqrt(pow(iP[u + 1] - iP[u], 2) + pow(img.ptr<uchar>(v + 1)[u] - iP[u], 2));
+			}
+		}
+		gP = grad.ptr<float>(0);
+		iP_pre = img.ptr<uchar>(0);
+		iP_aft = img.ptr<uchar>(1);
+		for (int u = 0; u < w_; u++)
+			gP[u] = iP_aft[u] - iP_pre[u];
+		gP = grad.ptr<float>(h_ - 1);
+		iP_pre = img.ptr<uchar>(h_ - 2);
+		iP_aft = img.ptr<uchar>(h_ - 1);
+		for (int u = 0; u < w_; u++)
+			gP[u] = iP_aft[u] - iP_pre[u];
+	}
+	else
+	{
+		float* gP = NULL;
+		uchar* iP_pre = NULL;
+		uchar* iP_aft = NULL;
+		for (int v = 1; v < h_ - 1; v++)
+		{
+			iP_pre = img.ptr<uchar>(v - 1);
+			iP_aft = img.ptr<uchar>(v + 1);
+			gP = grad.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				float grad = 0;
+				int pos = u * 3;
+				for (int c = 0; c < 3; c++)
+					grad += 0.5 * (iP_pre[pos + c] - iP_aft[pos + c]);
+				gP[u] = 0.333333 * grad;
+			}
+		}
+		gP = grad.ptr<float>(0);
+		float* gP_2 = grad.ptr<float>(h_ - 1);
+		iP_pre = img.ptr<uchar>(0);
+		iP_aft = img.ptr<uchar>(1);
+		uchar* iP_pre_1 = img.ptr<uchar>(h_ - 2);
+		uchar* iP_aft_1 = img.ptr<uchar>(h_ - 1);
 		for (int u = 0; u < w_; u++)
 		{
-			if (v > 0 && v < w_ - 1)
-				gP[u] = ((float)img.ptr<uchar>(v + 1)[u] - img.ptr<uchar>(v - 1)[u]) / 2;
-			else if (v == 0)
-				gP[u] = (float)img.ptr<uchar>(1)[u] - img.ptr<uchar>(0)[u];
-			else
-				gP[u] = (float)img.ptr<uchar>(h_ - 1)[u] - img.ptr<uchar>(h_ - 2)[u];
-			//gP[u] = abs(iP[u + 1] - iP[u]) + abs(img.ptr<uchar>(v + 1)[u] - iP[u]);
-			//gP[u] = sqrt(pow(iP[u + 1] - iP[u], 2) + pow(img.ptr<uchar>(v + 1)[u] - iP[u], 2));
+			float grad1 = 0;
+			float grad2 = 0;
+			int pos = u * 3;
+			for (int c = 0; c < 3; c++)
+			{
+				grad1 += iP_aft[pos + c] - iP_pre[pos + c];
+				grad2 += iP_aft_1[pos + c] - iP_pre_1[pos + c];
+			}
+			gP[u] = 0.333333 * grad1;
+			gP_2[u] = 0.333333 * grad2;
 		}
 	}
 }
 
-void StereoMatching::calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, int num)
+void StereoMatching::calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, int num , float Trunc)
 {
 	CV_Assert(grad[0].depth() == CV_32F);
 	const int n = param_.numDisparities;
-	const float costD = 500;
 	int leftCoe = 0, rightCoe = -1;
 	if (num == 1)
 		leftCoe = 1, rightCoe = 0;
@@ -143,15 +415,51 @@ void StereoMatching::calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, 
 		float* grad_y1P = grad_y[1].ptr<float>(v);
 		for (int u = 0; u < w_; u++)
 		{
+			short* arm = HVL[num].ptr<short>(v, u);
+			short* armTile = tileCrossL[num].ptr<short>(v, u);
+			float shortestH = 10000;
+			float shortestV = 10000;
+			for (int dir = 0; dir < 2; dir++)
+			{
+				if (arm[dir] < shortestH)
+					shortestH = arm[dir];
+				//if (armTile[dir] < shortest)
+				//	shortest = armTile[dir];
+			}
+			for (int dir = 2; dir < 4; dir++)
+			{
+				if (arm[dir] < shortestV)
+					shortestV = arm[dir];
+			}
+			
+			if (shortestH == 0)
+				shortestH++;
+			if (shortestV == 0)
+				shortestV++;
+			float a = shortestH / (shortestH + shortestV);
+			// aaaaaa
+			//Trunc = 4 + 32 * shortest / (param_.cbca_crossL[0] + 1);
+			//Trunc = 4 + 8 * shortest * shortest / (shortest * shortest + 25);
+			//Trunc = 2 + 10 * shortest / (shortest  + 5);
+			//Trunc = 4 + 8 * exp(-7 / (shortest + 1));
+			//Trunc = 5; //测试Trunc为6时的结果？？？？？？
+			//Trunc = 4 + 16 * exp(-);
+
 			float* vP = vm.ptr<float>(v, u);
+
 			for (int d = 0; d < n; d++)
 			{
 				int u0 = u + leftCoe * d;
 				int u1 = u + rightCoe * d;
 				if (u0 >= w_ || u1 < 0)
-					vP[d] = costD;
+					vP[d] = sqrt(pow(Trunc, 2) * 2);
 				else
-					vP[d] = (abs(grad0P[u0] - grad1P[u1]) + abs(grad_y0P[u0] - grad_y1P[u1])) / 2;
+				{
+					//vP[d] = sqrt(pow(a * min(abs(grad0P[u0] - grad1P[u1]), Trunc), 2) + pow((1 - a) * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc), 2));
+					//vP[d] = sqrt(pow(min(abs(grad0P[u0] - grad1P[u1]), Trunc), 2) + pow(min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc), 2));
+					//vP[d] = 0.5 * min(abs(grad0P[u0] - grad1P[u1]), Trunc) + 0.5 * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
+					vP[d] = a * min(abs(grad0P[u0] - grad1P[u1]), Trunc) + (1 - a) * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
+				}
 			}
 		}
 	}
@@ -159,6 +467,7 @@ void StereoMatching::calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, 
 
 void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float trunc)
 {
+	float Default = param_.is_gradNorm ? 1 : trunc;
 	CV_Assert(grad[0].depth() == CV_32F);
 	const int n = param_.numDisparities;
 	//const float costD = 500;
@@ -178,9 +487,14 @@ void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float tru
 				int u0 = u + leftCoe * d;
 				int u1 = u + rightCoe * d;
 				if (u0 >= w_ || u1 < 0)
-					*vP++ = trunc;
+					*vP++ = Default;
 				else
-					*vP++ = min(abs(grad0P[u0] - grad1P[u1]), trunc);
+				{
+					float cache = min(abs(grad0P[u0] - grad1P[u1]), trunc);
+					if (param_.is_gradNorm)
+						cache /= trunc;
+					*vP++ = cache;
+				}
 			}
 
 		}
@@ -215,30 +529,66 @@ void StereoMatching::saveFromDisp(Mat disp, string name)
 
 }
 
-void StereoMatching::grad(vector<Mat>& vm_grad)
+void StereoMatching::grad(vector<Mat>& vm_grad, float Trunc)
 {
 	// 计算梯度
+	//const float Trunc = 4;
 	vector<Mat> grad(2);
 	vector<Mat> grad_y(2);
+	vector<Mat> grad_xy(2);
+	vector<Mat> grad_vm(2);
+	vector<Mat> grad_y_vm(2);
 	for (int i = 0; i < 2; i++)
 	{
-		//grad[i].create(h_, w_, CV_32F);
+		grad[i].create(h_, w_, CV_32F);
 		grad_y[i].create(h_, w_, CV_32F);
+		grad_xy[i].create(h_, w_, CV_32F);
+		grad_vm[i].create(3, size_vm, CV_32F);
+		grad_y_vm[i].create(3, size_vm, CV_32F);
 		//Sobel(I_g[i], grad[i], CV_32F, 1, 0);
 		//Sobel(I_g[i], grad_y[i], CV_32F, 0, 1);
-		//calGrad(grad[i], I_g[i]);
+		calGrad(grad[i], I_g[i]);
 		calGrad_y(grad_y[i], I_g[i]);
+		//combineXYGrad(grad[i], grad_y[i], grad_xy[i]);
 		saveDispMap<float>(grad[i], to_string(i) + "grad");
-		//saveDispMap<float>(grad_y[i], to_string(i) + "grad_y");
+		saveDispMap<float>(grad_y[i], to_string(i) + "grad_y");
+		//saveDispMap<float>(grad_xy[i], to_string(i) + "grad_xy");
 	}
+
+	//计算CBCA的臂长，用于下面控制截断值
+	if (!param_.has_initArm)
+		initArm();
+	if (!param_.has_calArms)
+		calArms();
+
+	if (!param_.has_initTileArm)
+		initTileArm();
+	if (!param_.has_calTileArms)
+		calTileArms();
 
 	// 计算代价卷
 	int imgNum = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < imgNum; i++)
-		//calgradvm(vm_grad[i], grad, grad_y, i);
-		calgradvm_1d(vm_grad[i], grad, i, 2);
-
+	{
+		calgradvm(vm_grad[i], grad, grad_y, i, Trunc);
+		//calgradvm_1d(vm_grad[i], grad_xy, i, Trunc);
+		//calgradvm_1d(vm_grad[i], grad, i, Trunc);
+		//calgradvm_1d(vm_grad[i], grad_y, i, Trunc);
+		//addWeighted(grad_vm[i], 0.5, grad_y_vm[i], 0.5, 0, vm_grad[i]);
+	}
 	saveFromVm(vm_grad, "grad");
+}
+
+void StereoMatching::combineXYGrad(Mat& grad_x, Mat& grad_y, Mat& grad_xy)
+{
+	for (int v = 0; v < h_; v++)
+	{
+		float* xP = grad_x.ptr<float>(v);
+		float* yP = grad_y.ptr<float>(v);
+		float* xyP = grad_xy.ptr<float>(v);
+		for (int u = 0; u < w_; u++)
+			xyP[u] = sqrt(pow(xP[u], 2) + pow(yP[u], 2));
+	}
 }
 
 void StereoMatching::truncAD(vector<Mat>& vm)
@@ -260,45 +610,91 @@ void StereoMatching::truncAD(vector<Mat>& vm)
 	cout << "truncAD vm generated" << endl;
 }
 
-void StereoMatching::censusCal(vector<Mat>& vm_census)
+void StereoMatching::censusCal(vector<Mat>& vm_census, float truncRatio)
 {
 	cout << "start censusCal" << endl;
 	clock_t start = clock();
-	vector<Mat> censusCode(2);
+	const int win_N = 2;
+
+	vector<vector<int>> census_W(win_N);
+	
+	census_W[0] = {3, 4};
+	//census_W[0] = {2, 2};
+	census_W[1] = { 5, 5 };
+
 	int imgNum = Do_LRConsis ? 2 : 1;
 	Mat dispMap(h_, w_, CV_16S);
 	int channels = param_.census_channel;  // 1
-	int codeLength = (param_.W_U * 2 + 1) * (param_.W_V * 2 + 1) * channels;
-	int varNum = ceil(codeLength / 64.);
-	int size_census[] = { h_, w_, varNum };
-	censusCode[0].create(3, size_census, CV_64F);
-	censusCode[1].create(3, size_census, CV_64F);
+	int codeLength[win_N], varNum[win_N], * size_c[win_N];
+	vector<vector<Mat>> censusCode(win_N);
+
+	for (int i = 0; i < win_N; i++)
+	{
+		codeLength[i] = (census_W[i][0] * 2 + 1) *(census_W[i][1] * 2 + 1) * channels;
+		if (param_.censusFunc == 3)
+			codeLength[i] += 8 * channels;
+		varNum[i] = ceil(codeLength[i] / 64.);
+		size_c[i] = new int[3];
+		size_c[i][0] = h_;
+		size_c[i][1] = w_;
+		size_c[i][2] = varNum[i];
+		censusCode[i].resize(2);
+		censusCode[i][0].create(3, size_c[i], CV_64F);
+		censusCode[i][0] = 0;
+		censusCode[i][1].create(3, size_c[i], CV_64F);
+		censusCode[i][1] = 0;
+		delete[] size_c[i];
+		size_c[i] = NULL;
+	}
 
 	//gen_cen_vm_<0>(vm_census[0]);
 	//gen_cen_vm_<1>(vm_census[1]);
 	if (channels == 3)
-		genCensusCode(I_c, censusCode, param_.W_V, param_.W_U);
+	{
+		//genCensusCode(I_c, censusCode, param_.W_V, param_.W_U);
+	}
 	else
 	{
-		if (param_.censusFunc == 0)
+		for (int i = 0; i < win_N; i++)
 		{
-			/*	genCensus(I_g[0], censusCode[0], param_.W_V, param_.W_U);
-				genCensus(I_g[1], censusCode[1], param_.W_V, param_.W_U); *///编码0
-			genCensusCode(I_g, censusCode, param_.W_V, param_.W_U);  // 编码1
+			if (param_.censusFunc == 0)
+			{
+				/*	genCensus(I_g[0], censusCode[0], param_.W_V, param_.W_U);
+					genCensus(I_g[1], censusCode[1], param_.W_V, param_.W_U); *///编码0
+				genCensusCode<uchar>(I_g, censusCode[i], census_W[i][0], census_W[i][1]);
+			}
+			//else if (param_.censusFunc == 1)
+			//{
+			//	genCensusCode_neighC1(I_g, censusCode, param_.W_V, param_.W_U); //
+			//}
+			//else if (param_.censusFunc == 2)
+			//	genCensusCode_neighC2(I_g, censusCode, param_.W_V, param_.W_U); //
+			else if (param_.censusFunc == 3)
+				genCensusCode_NC_Sur(I_g, censusCode[i], census_W[i][0], census_W[i][1]);
 		}
-		else if (param_.censusFunc == 1)
-		{
-			genCensusCode_neighC1(I_g, censusCode, param_.W_V, param_.W_U); //
-		}
-		else if (param_.censusFunc == 2)
-			genCensusCode_neighC2(I_g, censusCode, param_.W_V, param_.W_U); //
-		else if (param_.censusFunc == 3)
-			genCensusCode_NC_Sur(I_g, censusCode, param_.W_V, param_.W_U);
+		//genCensusCode<float>(grad, censusCode[2], census_W[2][0], census_W[2][1]);
 	}
 
+	// xxxxxx
+		//计算CBCA的臂长，用于下面census窗口的选择
+	if (!param_.has_initArm)
+		initArm();
+	if (!param_.has_calArms)
+		calArms();
+
+	if (!param_.has_initTileArm)
+		initTileArm();
+	if (!param_.has_calTileArms)
+		calTileArms();
+
 	for (int i = 0; i < imgNum; i++)
-		//gen_cenVM_XOR(censusCode, vm_census[i], i);  // 0
-		genCensusVm(censusCode, vm_census[i], i);  // 1
+	{
+		gen_cenVM_XOR(censusCode[0], vm_census[i], codeLength[0], truncRatio, i);  // 0
+		//gen_cenVM_XOR_From2Code(censusCode, vm_census[i], codeLength, varNum, truncRatio, i);
+		//gen_cenVM_XOR_From2Code_tem(grad[i], censusCode, vm_census[i], codeLength, varNum, i);
+	}
+
+		//genCensusVm(censusCode, vm_census[i], i);  // 1
 
 	cout << "finish census cal" << endl;
 	clock_t end = clock();
@@ -320,9 +716,10 @@ void StereoMatching::ADCensusCal()
 		vm_asd[num].create(3, size_vm, CV_32F);
 		vm_census[num].create(3, size_vm, CV_32F);
 	}
-	asdCal(vm_asd, "AD", imgNum);
+	asdCal(vm_asd, "AD", imgNum, 20);
+	//bt_color(vm_asd);
 	//BF(vm_asd, DT);
-	censusCal(vm_census);
+	censusCal(vm_census, 0.5);
 	adCensus(vm_asd, vm_census);
 	cout << "finish ADCensus cal" << endl;
 	clock_t end = clock();
@@ -343,10 +740,10 @@ void StereoMatching::ADCensusGrad()
 		vm_census[num].create(3, size_vm, CV_32F);
 		vm_grad[num].create(3, size_vm, CV_32F);
 	}
-	asdCal(vm_asd, "AD", imgNum);
+	asdCal(vm_asd, "AD", imgNum, 10);
 	//BF(vm_asd, DT);
-	censusCal(vm_census);
-	grad(vm_grad); //xxxx
+	censusCal(vm_census, 0.3);
+	grad(vm_grad, 2); //xxxx
 	adCensuGradCombine(vm_asd, vm_census, vm_grad);
 	//adCensus(vm_asd, vm_census);
 	cout << "finish ADCensusGrad cal" << endl;
@@ -354,7 +751,6 @@ void StereoMatching::ADCensusGrad()
 	clock_t time = end - start;
 	cout << "ADCensus time：" << time << endl;
 	saveTime(time, "ADCensusGrad");
-
 }
 
 void StereoMatching::costCalculate()
@@ -364,10 +760,14 @@ void StereoMatching::costCalculate()
 	int imgNum = Do_LRConsis ? 2 : 1;
 	// AD、SD
 	if (costcalculation == "AD" || costcalculation == "SD")
-		asdCal(vm, costcalculation, imgNum);
+		asdCal(vm, costcalculation, imgNum, 20);
+
+	// BT
+	if (costcalculation == "BT")
+		bt(vm);
 
 	else if (costcalculation == "grad")
-		grad(vm);
+		grad(vm, 2);
 
 	else if (costcalculation == "TruncAD")
 		truncAD(vm);
@@ -375,12 +775,12 @@ void StereoMatching::costCalculate()
 	else if (costcalculation == "adGrad")
 		adGrad(vm);
 
-	else if (costcalculation == "gradCensus")
-		gradCensus(vm);
+	else if (costcalculation == "censusGrad")
+		censusGrad(vm);
 
 	// census
 	else if (costcalculation == "Census")
-		censusCal(vm);
+		censusCal(vm, 1);
 
 	// ZNCC
 	else if (costcalculation == "ZNCC")
@@ -480,10 +880,10 @@ void StereoMatching::dispOptimize()
 
 	string dispCalMethod = param_.Do_vmTop ? "wta_vmTop" : "wta";
 	string name = Do_sgm ? "so" : dispCalMethod;
-#ifdef DEBUG
+//#ifdef DEBUG
 	saveFromDisp<short, 0>(DP[0], name);
 	saveFromDisp<short, 1>(DP[1], name);
-#endif // DEBUG
+//#endif // DEBUG
 	if (Do_sgm)
 		cout << "scanline optimization finished" << endl << endl;
 	else
@@ -1327,11 +1727,14 @@ void StereoMatching::gen_NCC_vm(cv::Mat& I0, cv::Mat& I1, cv::Mat& E_std0, cv::M
 // AOS：0指示AD，1指示SD
 void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS, float trunc)
 {
+	float DEFAULT = param_.is_adNorm ? 1 : trunc;
 	const int channels = param_.SD_AD_channel;
 	Mat I0 = channels == 3 ? I_c[0] : I_g[0];
 	Mat I1 = channels == 3 ? I_c[1] : I_g[1];
+
 	const int n = param_.numDisparities;
-	const float DEFAULT = AOS == 0 ? 255 : 65535;
+	//const float DEFAULT = AOS == 0 ? 255 : 65535;
+	//trunc = trunc != 1000000 ? trunc : DEFAULT;
 	const int pow_index = AOS == 0 ? 1 : 2;
 	int leftCoefficient = 0, rightCoefficient = -1;
 	//float thre = AOS == 0 ? 20 : 400;
@@ -1351,7 +1754,7 @@ void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS, float trunc)
 				int uL = u + d * leftCoefficient;
 				int uR = u + d * rightCoefficient;
 				if (uL >= w_ || uR < 0)
-					vPtr[d] = trunc;
+					vPtr[d] = DEFAULT;
 				else
 				{
 					uchar* lPtr = I0.ptr<uchar>(v, uL);
@@ -1360,6 +1763,8 @@ void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS, float trunc)
 					for (int cha = 0; cha < channels; cha++)
 						sum += pow(abs((float)lPtr[cha] - (float)rPtr[cha]), pow_index);
 					vPtr[d] = min(sum / channels, trunc);
+					if (param_.is_adNorm)
+						vPtr[d] /= trunc;
 				}
 			}
 		}
@@ -1678,7 +2083,8 @@ void StereoMatching::calHorVerDis(int imgNum, int channel, uchar L, uchar L_out,
 	clock_t start = clock();
 	cout << "start cal CrossArm" << endl;
 	Mat I = channel == 3 ? I_c[imgNum].clone() : I_g[imgNum].clone();
-	ximgproc::guidedFilter(I, I, I, 9, 1);
+	if (param_.doGF_bef_calArm)
+		ximgproc::guidedFilter(I, I, I, 9, 50);
 	//xxxxx
 	//medianBlur(I, I, 3);
 	const int h = I.rows;
@@ -1707,6 +2113,100 @@ void StereoMatching::calHorVerDis(int imgNum, int channel, uchar L, uchar L_out,
 		}
 
 		Mat cross = HVL[imgNum];
+		for (int v = 0; v < h; v++)
+		{
+			for (int u = 0; u < w; u++)
+			{
+				uchar* IPtr = I.ptr<uchar>(v, u);
+				ushort* HVLPtr = cross.ptr<ushort>(v, u);
+				ushort arm = 1;
+				for (; arm <= L_out; arm++)
+				{
+					int v_arm = v + arm * dv, u_arm = u + arm * du;
+					if (v_arm < 0 || v_arm >= h || u_arm < 0 || u_arm >= w)
+						break;
+					uchar* armPtr = I.ptr<uchar>(v_arm, u_arm);
+					uchar* armPrePtr = I.ptr<uchar>(v + (arm - 1) * dv, u + (arm - 1) * du);
+					bool neighborDifInThres = judgeColorDif(armPtr, armPrePtr, C_D, channel);
+					bool initPresDifInThres = arm <= L ? judgeColorDif(IPtr, armPtr, C_D, channel) : judgeColorDif(IPtr, armPtr, C_D_out, channel);
+					if (!neighborDifInThres || !initPresDifInThres)
+						break;
+				}
+				if (--arm >= minL)
+					HVLPtr[direc] = arm;  // l已经被减过1了
+				else
+				{
+					for (int len = minL; len >= 0; len--)  // 动态求取边框区像素点的外部臂长，使其能取到min(minL，dis2border)
+					{
+						if (u + len * du >= 0 && u + len * du <= w - 1 && v + len * dv >= 0 && v + len * dv <= h - 1)
+						{
+							HVLPtr[direc] = len;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				ushort* crossP = cross.ptr<ushort>(v, u);
+				int armSum = 0;
+				for (int num = 0; num < 4; num++)
+				{
+					armSum += crossP[num];
+				}
+				crossP[4] = (ushort)armSum;
+			}
+		}
+
+	}
+	clock_t end = clock();
+	clock_t time = end - start;
+	if (imgNum == 0)
+	{
+		saveTime(time, "genArmForImg_L");
+	}
+	cout << "finish cal CrossArm" << endl;
+}
+
+//  L, L_out, C_D, C_D_out, minL xxxxxx
+void StereoMatching::calTileDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL)
+{
+	clock_t start = clock();
+	cout << "start cal CrossArm" << endl;
+	Mat I = channel == 3 ? I_c[imgNum].clone() : I_g[imgNum].clone();
+	//ximgproc::guidedFilter(I, I, I, 9, 1);
+	//xxxxx
+	//medianBlur(I, I, 3);
+	const int h = I.rows;
+	const int w = I.cols;
+
+	int du_[] = { -1, 1 }, dv_[] = { -1, -1 }, du, dv;
+	for (int direc = 0; direc < 4; direc++)
+	{
+		switch (direc)
+		{
+		case 0:
+			du = du_[0], dv = dv_[0];
+			break;
+		case 1:
+			du = -du;
+			dv = -dv;
+			break;
+		case 2:
+			du = du_[1];
+			dv = dv_[1];
+			break;
+		case 3:
+			du = -du;
+			dv = -dv;
+			break;
+		}
+
+		Mat cross = tileCrossL[imgNum];
 		for (int v = 0; v < h; v++)
 		{
 			for (int u = 0; u < w; u++)
@@ -1896,25 +2396,27 @@ void StereoMatching::gen_vm_from2vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 
 	const int n = param_.numDisparities;
 	
-	const float DEFAULT_MC = 2.f * 0.999;
-	const int W_V = param_.W_V;
-	const int W_U = param_.W_U;
-
-	int leftCoefficient = 0, rightCoefficient = 1;
-	if (LOR == 1)
-	{
-		leftCoefficient = 1;
-		rightCoefficient = 0;
-	}
 	for (int v = 0; v < h_; v++)
 	{
 		for (int u = 0; u < w_; u++)
 		{
+			short* arm = HVL[LOR].ptr<short>(v, u);
+			int st = 100000;
+			for (int dir = 0; dir < 4; dir++)
+			{
+				if (st > arm[dir])
+					st = arm[dir];
+			}
+			float a = 1 - exp(-0.5 / st);
 			float* vm0Ptr = vm0.ptr<float>(v, u);
 			float* vm1Ptr = vm1.ptr<float>(v, u);
 			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
 			for (int d = 0; d < n; d++)
+			{
+				//combinedVmPtr[d] = (1 - a) * (1 - exp(-vm0Ptr[d] / ARU0)) + a * (1 - exp(-vm1Ptr[d] / ARU1));
 				combinedVmPtr[d] = 2 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1);
+			}
+				
 		}
 	}
 }
@@ -1928,16 +2430,69 @@ void StereoMatching::gen_vm_from3vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 
 	const int n = param_.numDisparities;
 
-	const float DEFAULT_MC = 2.f * 0.999;
-	const int W_V = param_.W_V;
-	const int W_U = param_.W_U;
-
-	int leftCoefficient = 0, rightCoefficient = 1;
-	if (LOR == 1)
+	for (int v = 0; v < h_; v++)
 	{
-		leftCoefficient = 1;
-		rightCoefficient = 0;
+		for (int u = 0; u < w_; u++)
+		{
+			short* armP = HVL[LOR].ptr<short>(v, u);
+			int shortest = 10000;
+			for (int dir = 0; dir < 4; dir++)
+			{
+				if (armP[dir] < shortest)
+					shortest = armP[dir];
+			}
+			float a = 1 - exp(-1.0f / shortest);
+			//float cache = 1 - exp(-1.5f / shortest);
+			//float a = cache * 0.11 * 2;
+			//float c = cache * 0.89 * 2;
+			//float b = 1 - cache;
+			//a = a / (a + b + c);
+			//c = a / 0.11 * 0.89;
+			//b = 1 - a - c;
+			//float a = 0.333333;
+			//float c = 0.333333;
+			//float b = 0.333333;
+			//float c = (1 - a) * 0.89;
+
+			float* vm0Ptr = vm0.ptr<float>(v, u);
+			float* vm1Ptr = vm1.ptr<float>(v, u);
+			float* vm2Ptr = vm2.ptr<float>(v, u);
+			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
+			for (int d = 0; d < n; d++)
+			{
+				// wxy
+				//float adGradv = 0.7 * vm0Ptr[d] + 0.3 * vm2Ptr[d];
+				//combinedVmPtr[d] = a * (1 - exp(-adGradv / 2)) + (1 - a) * (1 - exp(-vm1Ptr[d] / 10));
+				//combinedVmPtr[d] = 2 - exp(-adGradv / 2) - exp(-vm1Ptr[d] / 10);
+				//float adCenv = a * vm0Ptr[d] + (1 - a) * vm1Ptr[d];
+				float adCenv = 0.5 * vm0Ptr[d] + 0.5 * vm1Ptr[d];
+				//float adCenv = a * (1 - exp(-vm0Ptr[d] / 5)) + (1 - a) * (1 - exp(-vm1Ptr[d] / 10));
+				//combinedVmPtr[d] = 0.11 * adCenv + 0.89 *(1 - exp(-vm2Ptr[d] / 2));
+				//combinedVmPtr[d] = 0.7 * adCenv + 0.3 * vm2Ptr[d];
+				//combinedVmPtr[d] = 2 - exp(-adCenv / 0.5) - exp(-vm2Ptr[d] / 2);
+				combinedVmPtr[d] = 0.7 * (1 - exp(-adCenv / 1)) + 0.3 * (1 - exp(-vm2Ptr[d] / 2));
+
+				//combinedVmPtr[d] = a * adGradv + (1 - a) * vm1Ptr[d];
+				//combinedVmPtr[d] = 0.3 * adGradv + 0.7 * vm1Ptr[d];
+				//combinedVmPtr[d] = 3 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1) - exp(-vm2Ptr[d] / ARU2);
+			}
+				//combinedVmPtr[d] = 3 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1) - exp(-vm2Ptr[d] / ARU2);
+				//combinedVmPtr[d] = a * (1 - exp(-vm0Ptr[d] / ARU0)) + b * (1 - exp(-vm1Ptr[d] / ARU1)) + c * (1 - exp(-vm2Ptr[d] / ARU2));
+				
+				//combinedVmPtr[d] = 3 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1);
+		}
 	}
+}
+
+void StereoMatching::gen_vm_from3vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, cv::Mat& vm2, int LOR)
+{
+	CV_Assert(vm0.depth() == CV_32F);
+	CV_Assert(vm1.depth() == CV_32F);
+	CV_Assert(combinedVm.depth() == CV_32F);
+	Mat dispMap(h_, w_, CV_16S);
+
+	const int n = param_.numDisparities;
+
 	for (int v = 0; v < h_; v++)
 	{
 		for (int u = 0; u < w_; u++)
@@ -1946,8 +2501,27 @@ void StereoMatching::gen_vm_from3vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 			float* vm1Ptr = vm1.ptr<float>(v, u);
 			float* vm2Ptr = vm2.ptr<float>(v, u);
 			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
+
+			short* armP = HVL[LOR].ptr<short>(v, u);
+			int shortest = 10000;
+			for (int dir = 0; dir < 4; dir++)
+			{
+				if (armP[dir] < shortest)
+					shortest = armP[dir];
+			}
+
+			float b = exp(-0.5f / shortest);
+			float a = (1 - b) * 0.11;
+			float c = (1 - b) * 0.89;
+			//float a = 0.2;
+			//float b = 0.4;
+			//float c = 1.0 - a - b;
+
 			for (int d = 0; d < n; d++)
-				combinedVmPtr[d] = 3 - exp(-vm0Ptr[d] / ARU0) - exp(-vm1Ptr[d] / ARU1) - exp(-vm2Ptr[d] / ARU2);
+			{
+				//combinedVmPtr[d] = 0.4 * (vm0Ptr[d] * a + vm1Ptr[d] * (1 - a)) + 0.6 * vm2Ptr[d];
+				combinedVmPtr[d] = vm0Ptr[d] * a + vm1Ptr[d] * b  + vm2Ptr[d] * c;
+			}
 		}
 	}
 }
@@ -1961,16 +2535,6 @@ void StereoMatching::gen_vm_from2vm_expadpWgt(Mat& HVL, cv::Mat& combinedVm, cv:
 
 	const int n = param_.numDisparities;
 
-	const float DEFAULT_MC = 2.f * 0.999;
-	const int W_V = param_.W_V;
-	const int W_U = param_.W_U;
-
-	int leftCoefficient = 0, rightCoefficient = 1;
-	if (LOR == 1)
-	{
-		leftCoefficient = 1;
-		rightCoefficient = 0;
-	}
 	for (int v = 0; v < h_; v++)
 	{
 		for (int u = 0; u < w_; u++)
@@ -1992,7 +2556,7 @@ void StereoMatching::gen_vm_from2vm_expadpWgt(Mat& HVL, cv::Mat& combinedVm, cv:
 	}
 }
 
-void StereoMatching::gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, const float weight0, const float weight1, int LOR)
+void StereoMatching::gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::Mat& vm1, int LOR)
 {
 	CV_Assert(vm0.depth() == CV_32F);
 	CV_Assert(vm1.depth() == CV_32F);
@@ -2001,15 +2565,6 @@ void StereoMatching::gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 
 	const int n = param_.numDisparities;
 
-	const int W_V = param_.W_V;
-	const int W_U = param_.W_U;
-
-	int leftCoefficient = 0, rightCoefficient = 1;
-	if (LOR == 1)
-	{
-		leftCoefficient = 1;
-		rightCoefficient = 0;
-	}
 	for (int v = 0; v < h_; v++)
 	{
 		for (int u = 0; u < w_; u++)
@@ -2017,13 +2572,57 @@ void StereoMatching::gen_vm_from2vm_add(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 			float* vm0Ptr = vm0.ptr<float>(v, u);
 			float* vm1Ptr = vm1.ptr<float>(v, u);
 			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
+
+			short* armP = HVL[LOR].ptr<short>(v, u);
+			int shortest = 10000;
+			for (int dir = 0; dir < 4; dir++)
+			{
+				if (armP[dir] < shortest)
+					shortest = armP[dir];
+			}
+			float a = 1 - exp(-1.0f / shortest);
+
 			for (int d = 0; d < n; d++)
 			{
 				//if (u - W_U < 0 || u + W_U >= w_ || u - d * rightCoefficient - W_U < 0 || u + d * leftCoefficient + W_U >= w_ ||
 				//	v - W_V < 0 || v + W_V >= h_)
 				//	combinedVmPtr[d] = DEFAULT_MC;
 				//else
-				combinedVmPtr[d] = vm0Ptr[d] * weight0 + vm1Ptr[d] * weight1;
+				//combinedVmPtr[d] = vm0Ptr[d] * weight0 + vm1Ptr[d] * weight1;
+				//combinedVmPtr[d] = vm0Ptr[d] * (1 - a) + vm1Ptr[d] * a;
+				combinedVmPtr[d] = vm0Ptr[d] * 0.5 + vm1Ptr[d] * 0.5;
+			}
+		}
+	}
+}
+
+
+void StereoMatching::gen_vm_from2vm_fixWgt(Mat& vm0, float wgt0, Mat& vm1, float wgt1, Mat& dst)
+{
+	CV_Assert(vm0.depth() == CV_32F);
+	CV_Assert(vm1.depth() == CV_32F);
+	CV_Assert(dst.depth() == CV_32F);
+	Mat dispMap(h_, w_, CV_16S);
+
+	const int n = param_.numDisparities;
+
+
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			float* vm0Ptr = vm0.ptr<float>(v, u);
+			float* vm1Ptr = vm1.ptr<float>(v, u);
+			float* dstPtr = dst.ptr<float>(v, u);
+
+			for (int d = 0; d < n; d++)
+			{
+				//if (u - W_U < 0 || u + W_U >= w_ || u - d * rightCoefficient - W_U < 0 || u + d * leftCoefficient + W_U >= w_ ||
+				//	v - W_V < 0 || v + W_V >= h_)
+				//	combinedVmPtr[d] = DEFAULT_MC;
+				//else
+				//combinedVmPtr[d] = vm0Ptr[d] * weight0 + vm1Ptr[d] * weight1;
+				dstPtr[d] = vm0Ptr[d] * wgt0 + vm1Ptr[d] * wgt1;
 			}
 		}
 	}
@@ -2328,6 +2927,8 @@ void StereoMatching::guideFilter()
 	//vmTrans(vm, guideVm);  // 从3维mat值赋给2维的mat数组
 	const int n = param_.numDisparities;
 	vector<Mat> I(2);
+	// xxxx
+
 	for (int i = 0; i < 2; i++)
 	{
 		I[i] = param_.gf_channel_isColor ? I_c[i].clone() : I_g[i].clone();
@@ -2598,10 +3199,15 @@ void StereoMatching::adCensus(vector<Mat>& adVm, vector<Mat>& cenVm)
 				initArm();
 			if (!param_.has_calArms)
 				calArms();
-			gen_vm_from2vm_expadpWgt(HVL[i], vm[i], adVm[i], cenVm[i], 10, 30, i);
+			gen_vm_from2vm_expadpWgt(HVL[i], vm[i], adVm[i], cenVm[i], 5, 10, i);
 		}
 		else
-			gen_vm_from2vm_exp(vm[i], adVm[i], cenVm[i], 10, 30, i);
+		{
+			//addWeighted(adVm[i], 0.45, cenVm[i], 0.55, 0, vm[i]);
+			//xxxxx
+			//gen_vm_from2vm_add(vm[i], adVm[i], cenVm[i], i);
+			gen_vm_from2vm_exp(vm[i], adVm[i], cenVm[i], 5, 10, i); // lamAD 10 5 3.5, lamC 30 10 0.3
+		}
 	}
 #ifdef DEBUG
 	saveFromVm(vm, "adCensus");
@@ -2616,7 +3222,8 @@ void StereoMatching::adCensuGradCombine(vector<Mat>& adVm, vector<Mat>& cenVm, v
 	int imgNum = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < imgNum; i++)
 	{
-		gen_vm_from3vm_exp(vm[i], adVm[i], cenVm[i], gradVm[i], 10, 30, 2, i);
+		gen_vm_from3vm_exp(vm[i], adVm[i], cenVm[i], gradVm[i], 5, 10, 2, i);
+		//gen_vm_from3vm_add(vm[i], adVm[i], cenVm[i], gradVm[i], i);
 	}
 #ifdef DEBUG
 	saveFromVm(vm, "adCensusGrad");
@@ -2712,6 +3319,36 @@ void StereoMatching::calArms()
 	cout << "HVL generated" << endl;
 }
 
+void StereoMatching::calTileArms()
+{
+	int channels = cbca_genArm_isColor ? 3 : 1;
+	const uchar C_D = param_.Cross_C;  // 20
+	const uchar C_D_out = 6;
+	const uchar minL = param_.cbca_minArmL;  // 1
+
+	for (int num = 0; num < TileL_num; num++)
+	{
+		cout << "start cal horVerArm for img " << num << endl;
+		const uchar L = param_.cbca_crossL[0];  // 17
+		const uchar L_out = param_.cbca_crossL_out[0];  // 34  
+		calTileDis(num, channels, L, L_out, C_D, C_D_out, minL); // yyyyyy
+		if (num == 0 && object == "teddy")
+		{
+			int v[] = { 28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299 };
+			int u[] = { 381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198 };
+			drawArmForPoint(tileCrossL[0], v, u, 12);
+		}
+
+		// 生成左右图每个点在每个视差下的水平、竖直轴（通过交运算），存成一个h*w*n*4的mat
+		//if (param_.cbca_intersect)
+		//	genTrueHorVerArms();
+
+		cout << "finish cal TileArm for img " << num << endl;
+	}
+	param_.has_calTileArms = 1;
+	cout << "TileHVL generated" << endl;
+}
+
 void StereoMatching::initArm()
 {
 	HVL_num = 2; // 分别表示左图和右图
@@ -2728,6 +3365,25 @@ void StereoMatching::initArm()
 		HVL_INTERSECTION[i].create(4, HVL_IS_size, CV_16U);
 	}
 	param_.has_initArm = 1;
+	/////
+}
+
+void StereoMatching::initTileArm()
+{
+	TileL_num = 2; // 分别表示左图和右图
+	tileCrossL.resize(TileL_num);
+	//if (param_.cbca_intersect)  // 这个后面再做处理（因为涉及到后面一些代码）
+	tile_INTERSECTION.resize(TileL_num);
+
+	int Tile_size[] = { h_, w_, 5 };
+	int Tile_IS_size[] = { h_, w_, param_.numDisparities, 5 };
+	for (int i = 0; i < HVL_num; i++)
+	{
+		tileCrossL[i].create(3, Tile_size, CV_16U);
+		//if (param_.cbca_intersect)
+		tile_INTERSECTION[i].create(4, Tile_IS_size, CV_16U);
+	}
+	param_.has_initTileArm = 1;
 	/////
 }
 
