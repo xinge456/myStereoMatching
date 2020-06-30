@@ -19,6 +19,7 @@
 #include <time.h>
 #include <map>
 #include <set>
+#include "NL/NLCCA.h"
 
 #define USE_OPENMP
 #if defined(_OPENMP) && defined(USE_OPENMP)
@@ -31,13 +32,17 @@
 #define OMP_PARALLEL_FOR
 #endif
 
+//#define JBF_STANDARD
+#define DEBUG
 //#define FAST_INV
-#define MY_GUIDE
+//#define MY_GUIDE
+//#define USE_RECONCV
 
 using namespace std;
 using namespace cv;
 
 // 左右输入图、生成左右视差图，并且包含许多优化步骤的控制开关
+
 class StereoMatching
 {
 public:
@@ -51,7 +56,7 @@ public:
 	// 步骤开关控制
 	static const bool UniqCk = 0;
 	static const bool SubIpl = 0;
-	static const bool Ssdave = 1;
+	static const bool Ssdave = 0;
 	static const bool Do_sgm = 0;
 	static const bool LRM = 1;  // 用于控制sgm在代价聚合的时候，是否包括左右边界部分
 	static const bool Last_MedBlur = 1;
@@ -59,10 +64,14 @@ public:
 	static const bool cbca_genArm_isColor = 1; // 是用彩色图产生的臂还是灰度图
 	static const bool cbca_arm_out = 1; // 生成臂的时候是否加外层臂
 	static const bool preMedBlur = 0; // 对彩色图是否进行中值滤波的预处理
-	static const bool discontiAdjust = 1;
+
 	static const bool Do_dispOptimize = 1;
+	// wxy
 	static const bool Do_refine = 0;
+	static const bool hv_nolimt = 0;
 	static const bool Do_LRConsis = 1;
+	static const bool Do_calPKR = 0;
+	static const bool Do_WM = 0;
 	static const bool Do_regionVote = 1;
 	static const bool Do_properIpol = 1;
 	static const bool Do_bgIpol = 0;
@@ -87,6 +96,7 @@ public:
 		int DISP_INV;
 		int DISP_OCC;
 		int DISP_MIS;
+		int DISP_PKR;
 		int DISP_SCALE;
 		int DISP_SHIFT;
 		float ZNCC_DEFAULT_MC;
@@ -114,19 +124,26 @@ public:
 		bool adCensus_useAdpWgt;
 		bool adGrad_useAdpWgt;
 
+		bool gradFuse_adpWgt;
+		bool grad_use2direc;
+
 		bool has_initArm;
 		bool has_calArms;
 		bool has_initTileArm;
 		bool has_calTileArms;
-		int Cross_C;
 		int cbcaTrunc_MC_gray;
 		int cbcaTrunc_MC_color;
 		int cbca_minArmL;
 		int cbca_iterationNum;
 		int cbca_ad_channels;
 		bool cbca_intersect;
-		uchar cbca_crossL[2];
-		uchar cbca_crossL_out[2];
+		uchar cbca_crossL[3];
+		uchar cbca_crossL_out[3];
+		uchar cbca_cTresh[3];
+		uchar cbca_cTresh_out[3];
+		bool cbca_double_win;
+		bool GF_double_win;
+		bool cbca_use_adpArm;
 		int cbca_armDirec; // 0 代表水平和垂直，1代表倾斜45度的两个方向
 		int cbca_armHV;
 		int cbca_armTile;
@@ -144,9 +161,11 @@ public:
 		int	cbca_armSLimit;
 		bool doGF_bef_calArm;
 
-		int gf_r;
-		float gf_eps;
+		int gf_r[2];
+		float gf_eps[2];
 		bool gf_channel_isColor;
+
+		bool FIF_neighLimit;
 
 		int region_vote_nums;
 		int regVote_SThres;
@@ -165,16 +184,27 @@ public:
 		int vmTop_Num;
 		float vmTop_thres;
 		int vmTop_thres_dirNum;
+		bool vmTop_hasCir2;
+		bool vmTop_cir3_doColorLimit;
 		int sign_v_range[2];
 		int sign_u_range[2];
 
 		std::string savePath;
 		std::string err_name;
+		bool saveErr2CsvOnlyAll;
+		bool saveErr2CsvOnlyNonocc;
+		string errCsvName;
 
-		Parameters(int maxDisp, int h, int w)
+		int lamG;
+		int lamCen;
+
+		int ts;
+		int disSc;
+
+		Parameters(int maxDisp, int h, int w, int lamCen_, int lamG_, int M_, int lamc_, int ts_, string errCsvName_, int disSc_)
 		{
-			W_U = 2;
-			W_V = 2;
+			W_U = 4;
+			W_V = 3;
 			ChooseSmall = true;
 			numDisparities = maxDisp + 1;
 			uniquenessRatio_2small = 0.95;
@@ -185,6 +215,7 @@ public:
 			DISP_INV = -16;
 			DISP_OCC = -2 * 16;
 			DISP_MIS = -3 * 16;
+			DISP_PKR = -4 * 16;
 
 			DISP_SCALE = 16;
 			DISP_SHIFT = 4;
@@ -199,17 +230,20 @@ public:
 			census_W[0] = 2;
 			census_W[1] = 5;
 
-			adCensus_useAdpWgt = 1;
+			adCensus_useAdpWgt = 0;
 			adGrad_useAdpWgt = 0;
 
 			sgm_scanNum = 4;  //4
-			sgm_P1 = 1.0;  // ssd: 10、 2500、110000、200,  census:10
-			sgm_P2 = 3.0;  // ssd: 120、 30600、16386300、10000,  census:120
+			sgm_P1 = 10000;  // ssd: 10、 2500、110000、200,  census:10
+			sgm_P2 = 10000;  // ssd: 120、 30600、16386300、10000,  census:120
 			sgm_corDifThres = 15;
-			sgm_reduCoeffi1 = 4;
-			sgm_reduCoeffi2 = 10;
+			sgm_reduCoeffi1 = 4; // 4
+			sgm_reduCoeffi2 = 10;  // 10
 		
+			// wxy
 			censusFunc = 3; // 0代表中心像素点比，1代表前一个像素点和后一个比，2代表两者的结合，3代表传统Census后接上最内圈前后比较编码
+			gradFuse_adpWgt = 1;
+			grad_use2direc = 1;
 			is_censusNorm = 0;
 			is_adNorm = 0;
 			is_gradNorm = 0;
@@ -220,7 +254,6 @@ public:
 			has_initTileArm = 0;
 			has_calTileArms = 0;
 			// 彩色时Cross_L、Cross_C、cbcaTrunc_MC_color的默认值分别为17，20、60
-			Cross_C = 20;
 			cbcaTrunc_MC_gray = 60;
 			cbcaTrunc_MC_color = 60;
 			cbca_minArmL = 1;
@@ -228,14 +261,25 @@ public:
 			cbca_ad_channels = 3;
 			cbca_intersect = true;
 			cbca_crossL[0] = 17;  // 17
-			cbca_crossL[1] = 40;
+			cbca_crossL[1] = 23;  // 12, 6, 17
+			cbca_crossL[2] = 34;
 			cbca_crossL_out[0] = 34;  // 34
-			cbca_crossL_out[1] = 60;
+			cbca_crossL_out[1] = 23;  // 22, 11, 34
+			cbca_crossL_out[2] = 34;
+			cbca_cTresh[0] = 20;
+			cbca_cTresh[1] = 30;
+			cbca_cTresh[2] = 30;
+			cbca_cTresh_out[0] = 6;
+			cbca_cTresh_out[1] = 0;
+			cbca_cTresh_out[2] = 0;
+			cbca_double_win = false;
+			GF_double_win = false;
+			cbca_use_adpArm = false;
 			cbca_armDirec = 1;
 			cbca_armHV = 1;
 			cbca_armTile = 0;
 			cbca_armCombineType = 0; // 0 代表根据非交臂长来选， 1代表根据交的臂长来选，2代表根据非交面积来选，3代表根据交面积来选
-			cbca_armTile_addNeigh = true;
+			cbca_armTile_addNeigh = false;
 			cbca_do_limitArmSmallLen = false;  // 代价聚合改进控制开关
 			cbca_limitArmSamllLenFirst = true;
 			cbca_box_WV = 1;
@@ -250,16 +294,21 @@ public:
 			doGF_bef_calArm = false;
 
 
-			gf_r = 9;  // 13
-			gf_eps = 0.0001;
+			gf_r[0] = 9;  // 13
+			gf_eps[0] = 0.0001;
+			gf_r[1] = 27;
+			gf_eps[1] = 0.0001;
 			gf_channel_isColor = true;
+
+			FIF_neighLimit = 0;
+
 			
 			region_vote_nums = 2;
 			regVote_SThres = 20;
 			regVote_hratioThres = 0.4;
 			regVote_type = 0;  // 0代表用HV的，1代表tile的，2代表HV+tlie的
 			interpolateType = 0;  // 0代表只用RV，1代表只用BG，2代表RV+BG, 3代表改进版RV+BG
-			bgIplDepth = 5;
+			bgIplDepth = 1000;
 			bgIpDir = 2;
 			RVdir = "1Dir";
 			cbbi_inner = false;
@@ -267,18 +316,37 @@ public:
 			err_ip_dispV = -50;
 			cor_ip_dispV = -100;
 
+			// wxy
 			Do_vmTop = false;
 			vmTop_method = 0; // 10
-			vmTop_Num = 6;
-			vmTop_thres = 1.08; //1.08
+			vmTop_Num = M_; // 6
+			vmTop_thres = lamc_ * 0.01; //1.08
 			vmTop_thres_dirNum = 8;
-			sign_v_range[0] = 358; // teddy: h-14 venus:91	teddy_GF_1.08_0:91, teddy_GF_1.08_1:358 teddy_CBCA_1.08_0:61,teddy_CBCA_1.08_1:358
-			sign_v_range[1] = 361; // teddy: h-11 venus:92	teddy_GF_1.08_0:94, teddy_GF_1.08_1:361 	teddy_CBCA_1.08_0:64,teddy_CBCA_1.08_0:361
+			vmTop_hasCir2 = true;
+			vmTop_cir3_doColorLimit = false;
+			// 括号中为左上角和右下角的坐标(x,y)，teddy_cbca_4_1.05:(347,6)（407，27）;(257,43)(296,103);(0,370)(450,372);(0,360)(450,365);(0,361)(449,370)
+			// Reindeer_cbca_4_1.05:(206, 222)（270，250）;
+			// Baby2_cbca_4_1.05:(80,223)(135,339)
+			// Wood2_cbca_4_1.05:(310,39)(407,86);(150,286)(246,328)
+			// Cones_cbca_4_1.05:(46,300)(76,359)
+			// Books_cbca_4_1.05:(60,325)(149,350);(204,216)(242,240);(201,44)(278,86)
+			// Cloth2:(98,265)(157,322)
+			// Bowling1:(115,54)(204,85)
+			sign_v_range[0] = 361; // teddy: h-14 venus:91	teddy_GF_1.08_0:91, teddy_GF_1.08_1:358 teddy_CBCA_1.08_0:61,teddy_CBCA_1.08_1:358, teddy_cbca_4_1.05:
+			sign_v_range[1] = 370; // teddy: h-11 venus:92	teddy_GF_1.08_0:94, teddy_GF_1.08_1:361 	teddy_CBCA_1.08_0:64,teddy_CBCA_1.08_0:361
 			sign_u_range[0] = 0; // teddy:0 venus:0			teddy_GF_1.08_0:0
-			sign_u_range[1] = w; // teddy:w	venus:w			teddy_GF_1.08_0:w
+			sign_u_range[1] = 449; // teddy:w	venus:w			teddy_GF_1.08_0:w
 
-			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "census(7_9)_GF" + "\\";
-			err_name = "census(7_9)_GF.txt";
+			lamCen = lamCen_;
+			lamG = lamG_;
+			ts = ts_;
+			// wxy
+			errCsvName = errCsvName_;
+			disSc = disSc_;
+			saveErr2CsvOnlyAll = true;
+			saveErr2CsvOnlyNonocc = true;
+			savePath = root + object + "\\" + costcalculation + "-" +aggregation + "-" + optimization + "\\" + "20200627_test_so" + "\\";
+			err_name = "1.txt";
 		}  
 	};
   // construct
@@ -304,6 +372,8 @@ public:
 
 	void calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, int num, float Trunc);
 
+	void calgradvm_mag_and_phase(Mat& vm, vector<Mat>& grad_xy, vector<Mat>& grad_atan, int num, float Trunc);
+
 	void calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float trunc = 2);
 
 	void calGrad(Mat& grad, Mat& img);
@@ -312,7 +382,11 @@ public:
 
 	void grad(vector<Mat>& vm_grad, float Trunc);
 
+	void grad_color(vector<Mat>& vm_grad, float Trunc);
+
 	void combineXYGrad(Mat& grad_x, Mat& grad_y, Mat& grad_xy);
+
+	void getAtanGrad(Mat& grad_x, Mat& grad_y, Mat& grad_atan);
 
 	void truncAD(vector<Mat>& vm);
 
@@ -326,6 +400,9 @@ public:
 
 	void pipeline();
 
+	void openCSV();
+	void closeCSV();
+
 	void costCalculate();
 
 	void dispOptimize();
@@ -336,6 +413,8 @@ public:
 
 	// AD、SD
 	void gen_ad_sd_vm(Mat& asd_vm, int LOR, int AOS, float trunc = 1000000);
+
+	void gen_ad_vm(Mat& vm, Mat& I_l, Mat& I_r, float Trunc, int LOR);
 
 	void gen_truncAD_vm(Mat& truncAD_vm, int LOR);
 
@@ -581,20 +660,23 @@ public:
 					{
 						for (int du = -R_U; du <= R_U; du++)
 						{
-							for (int c = 0; c < channels; c++)
-							{
-								if (step > 63) 
+							//if (dv != 0 || du != 0)
+							//{
+								for (int c = 0; c < channels; c++)
 								{
-									censP[dep] = cs;
-									cs = 0;
-									step = 0;
-									dep++;
+									if (step > 63)
+									{
+										censP[dep] = cs;
+										cs = 0;
+										step = 0;
+										dep++;
+									}
+									cs <<= 1;
+									if (IP[c] - I_B[num].ptr<T>(v + R_V + dv, u + R_U + du)[c] < 0)
+										cs++;
+									step++;
 								}
-								cs <<= 1;
-								if (IP[c] - I_B[num].ptr<T>(v + R_V + dv, u + R_U + du)[c] < 0)
-									cs++;
-								step++;
-							}
+							//}
 						}
 					}
 					if (step > 0)
@@ -806,20 +888,23 @@ public:
 					{
 						for (int du = -R_U; du <= R_U; du++)
 						{
-							for (int c = 0; c < channels; c++)
-							{
-								if (step > 63)
+							//if (dv != 0 || du != 0)
+							//{
+								for (int c = 0; c < channels; c++)
 								{
-									censP[dep] = cs;
-									cs = 0;
-									step = 0;
-									dep++;
+									if (step > 63)
+									{
+										censP[dep] = cs;
+										cs = 0;
+										step = 0;
+										dep++;
+									}
+									cs <<= 1;
+									if (IP[c] - I_B[num].ptr<uchar>(v + R_V + dv, u + R_U + du)[c] < 0)
+										cs++;
+									step++;
 								}
-								cs <<= 1;
-								if (IP[c] - I_B[num].ptr<uchar>(v + R_V + dv, u + R_U + du)[c] < 0)
-									cs++;
-								step++;
-							}
+							//}
 						}
 					}
 					for (int i = 0; i < sur_num; i++)
@@ -1218,7 +1303,7 @@ public:
 	}
 
 	template <int LOR = 0>
-	void calvm_AWS(int v0, int v1, int u0, int u1, int n, int W_V, int W_U, int veticalShift, int horizontalShift, Mat& vmTem, Mat (&wt)[2], Mat& vm_IB)
+	void calvm_AWS(int W_V, int W_U, Mat& vmTem, Mat (&wt)[2], Mat& vm_IB)
 	{
 		int S = (W_V * 2 + 1) * (W_U * 2 + 1);
 		int num = 0, ratio = 1;
@@ -1229,17 +1314,18 @@ public:
 			rightCoefficient = 0;
 		}
 
-		for (int v = v0; v < v1; v++)
+		for (int v = 0; v < h_; v++)
 		{
-			for (int u = u0; u < u1; u++)
+
+			for (int u = 0; u < w_; u++)
 			{
 				float* vmTP = vmTem.ptr<float>(v, u);
 
-				for (int d = 0; d < n; d++)
+				for (int d = 0; d < d_; d++)
 				{
 					int u1 = u + d * leftCoefficient;
 					int u2 = u + d * rightCoefficient;
-					if (u1 < w_ - (W_U - horizontalShift) && u2 >= (W_U - horizontalShift))
+					if (u1 < w_ && u2 >= 0)
 					{
 						float* wtP1 = wt[0].ptr<float>(v, u1);
 						float* wtP2 = wt[1].ptr<float>(v, u2);
@@ -1252,18 +1338,12 @@ public:
 							{
 								float ele = wtP1[step] * wtP2[step];
 								denom += ele;
-								numer += ele * vm_IB.ptr<float>(v + veticalShift + dv, u + horizontalShift + du)[d];
+								numer += ele * vm_IB.ptr<float>(v + W_V + dv, u + W_U + du)[d];
 								step++;
 							}
 						}
-						vmTP[d] = numer / denom / S;
+						vmTP[d] = numer / denom ;
 					}
-				}
-				num++;
-				if (num / (1000 * ratio) > 0)
-				{
-					ratio++;
-					cout << num << endl;
 				}
 			}
 		}
@@ -1389,26 +1469,23 @@ public:
 		}
 	}
 
-	void genWeight_AWS(int v0, int v1, int u0, int u1, int W_V, int W_U, int verticalShift, int horizontalShift, Mat (&wt)[2], Mat (&Lab)[2])
+	void genWeight_AWS(int W_V, int W_U,  Mat& wt, Mat& Lab)
 	{
-		for (int i = 0; i < 2; i++)
+		for (int v = 0; v < h_; v++)
 		{
-			for (int v = v0; v < v1; v++)
+			for (int u = 0; u < w_; u++)
 			{
-				for (int u = u0; u < u1; u++)
+				uchar* LabP1 = Lab.ptr<uchar>(v + W_V, u + W_U);
+				int step = 0;
+				float* wtP = wt.ptr<float>(v, u);
+				for (int dv = -W_V; dv <= W_V; dv++)
 				{
-					uchar* LabP1 = Lab[i].ptr<uchar>(v + verticalShift, u + horizontalShift);
-					int step = 0;
-					float* wtP = wt[i].ptr<float>(v, u);
-					for (int dv = -W_V; dv <= W_V; dv++)
+					for (int du = -W_U; du <= W_U; du++)
 					{
-						for (int du = -W_U; du <= W_U; du++)
-						{
-							uchar* LabP2 = Lab[i].ptr<uchar>(v + verticalShift + dv, u + du + horizontalShift);
-							float weight = calW4_AWS(LabP1, LabP2, dv, du);
-							wtP[step] = weight;
-							step++;
-						}
+						uchar* LabP2 = Lab.ptr<uchar>(v + W_V + dv, u + du + W_U);
+						float weight = calW4_AWS(LabP1, LabP2, dv, du);
+						wtP[step] = weight;
+						step++;
 					}
 				}
 			}
@@ -1470,14 +1547,40 @@ public:
 		return w;
 	}
 
+	void calPKR(Mat& vm, Mat& mask);
+
+	void signDp_UsingPKR(Mat& disp, Mat& PKR_Err_Mask);
+
+	void combine2Vm(vector<Mat>& vm, vector<Mat>& vm2);
+
+	void combine2Vm_2(vector<Mat>& vm, vector<Mat>& vm2, vector<Mat>& HVL);
+
+	void combine2Vm_3(vector<Mat>& vm, vector<Mat>& vm2);
+
+	void combine2Vm_4(vector<Mat>& vm, vector<Mat>& vm2);
+
 	// cross-based cost aggregation
 	void CBCA();
 
-	void guideFilter();
+	void GF();
+
+	void GFNL();
+
+	void guideFilter(int paramNum, vector<Mat>& vm);
+
+	void FIF();
+
+	void FIF_Improve();
+
+	void NL();
 
 	Mat guideFilterCore_matlab(Mat& I, Mat p, int r, float eps);
 
 	void guideFilterCore(Mat& source, Mat& guided_image, Mat& output, int radius, float epsilon);
+
+	Mat CumSum(const Mat& src, const int d);
+
+	Mat BoxFilter(const Mat& imSrc, const int r);
 
 	void vmTrans(vector<Mat>& vm, vector<vector<Mat>>& guildFilterVm);
 
@@ -1489,15 +1592,42 @@ public:
 
 	void adCensusZncc(vector<Mat>& vm_ad, vector<Mat>& vm_census, vector<Mat>& vm_zncc);
 
-	void cbca_aggregate();
+	void cbca_aggregate(int param_Num, vector<Mat>& vm);
+
+	void cbca_core(vector<Mat>& vm, vector<Mat>& HVL, vector<Mat>& HVL_INTERSECTION, int ITNUM);
 
 	void initArm();
 	void initTileArm();
 
-	void calArms();
+	template <typename T>
+	void calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, int L, int L_out, int cTresh, int cTresh_out);
+
+	template <typename T>
+	void calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, int L, int cTresh);
+
+	template <typename T>
+	void calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, int L0, int L1, int L2, int tresh0, int tresh1, int tresh2);
+
+	template <typename T>
+	void calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, vector<int> L, vector<int> thres);
+
+	void showArms(int v, int u);
+
 	void calTileArms();
 
-	void calHorVerDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL);
+	template <typename T>
+	void calHorVerDis(Mat& I, Mat& cross, int L, int L_out, int C_D, int C_D_out, int minL);
+
+	template <typename T>
+	void calHorVerDis(Mat& I, Mat& cross, int L0, int L1, int L2, int thresh0, int thresh1, int thresh2, int minL);
+
+	template <typename T>
+	void calHorVerDis(Mat& img, Mat& cross, int L, int DIF, int minL);
+
+	template <typename T>
+	void calHorVerDis(Mat& I, Mat& cross, vector<int> L, vector<int> thresh, int minL);
+
+	void calHorVerDis2(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL);
 
 	void calTileDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL);
 
@@ -1505,18 +1635,16 @@ public:
 
 	void calTileNeigh(int imgNum, int channels, cv::Mat& tile_neigh, uchar DIFThres);
 
-	void genTrueHorVerArms();
+	void genTrueHorVerArms(vector<Mat>& HVL, vector<Mat>& HVL_INTERSECTION);
 
 	void gen1DCumu(cv::Mat& vm, cv::Mat& area, Mat& areaIS, int dv, int du);
 
 	// direc指示head、tail连线的方向，0代表水平或者-45+135度，1代表垂直或者45+225度
 	void cal1DCost(Mat & vm, cv::Mat & HVL, cv::Mat & area, Mat& areaIS, Mat& HVL_INTERSECTION, int dv, int du, int direc)
 	{
-		const int W_U = param_.W_U;
-		const int W_V = param_.W_V;
 		int head_num = direc * 2 + 1;
 		int tail_num = direc * 2;
-		CV_Assert(HVL.type() == CV_16U);
+		CV_Assert(HVL.depth() == CV_16U);
 
 		const int n = param_.numDisparities;
 
@@ -1618,7 +1746,7 @@ public:
 	void clearTimeTxt();
 
 	template <typename T>
-	void calErr(Mat& DP, Mat& DT, string procedure)
+	void calErr(Mat& DP, Mat& DT, string procedure, bool calCSV = false)
 	{
 		string addr = param_.savePath + param_.err_name;
 		ofstream fout;
@@ -1669,6 +1797,22 @@ public:
 				float rms = sqrt(errorValueSum / sumNum);
 				std::cout << endl << regionName << "\terrorRatio: " << PBM << " epe: " << rms << " " + procedure << endl;
 				fout << regionName + "\tPBM: " << PBM << "\tRMS: " << rms << "\t";
+				// www
+				if (calCSV)
+				{
+					if (param_.saveErr2CsvOnlyAll)
+					{
+						if (regionName == "all")
+							ofs_ << PBM << ",";
+					}
+					else if (param_.saveErr2CsvOnlyNonocc)
+					{
+						if (regionName == "nonocc")
+							ofs_ << PBM << ",";
+					}
+					else
+						ofs_ << PBM << ",";
+				}
 			}
 			fout << "\n";
 			fout.close();
@@ -1693,23 +1837,18 @@ public:
 		CV_Assert(DT.type() == CV_32F);
 		CV_Assert(DP.size() == DT.size());
 
-		for (int v = 0; v < h_; v++)
-		{
-			T* dpPtr = DP.ptr<T>(v);
-			float* dtPtr = DT.ptr<float>(v);
-			for (int u = 0; u < w_; u++)
+		// "tsukuba", "venus", "teddy", "cones"
+		if (object == "tsukuba" || object == "venus" || object == "teddy" || object == "cones")
+		{// wxy
+			Mat occMask = I_mask[0];
+			for (int v = 0; v < h_; v++)
 			{
-				uchar* biPtr = biaryImg.ptr<uchar>(v, u);
-				if (dtPtr[u] == 0)
+				T* dpPtr = DP.ptr<T>(v);
+				float* dtPtr = DT.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
 				{
-					biPtr[0] = 0;
-					biPtr[1] = 0;
-					biPtr[2] = 125;
-
-				}
-				else
-				{
-					if (abs(dpPtr[u] - dtPtr[u]) > param_.errorThreshold)
+					uchar* biPtr = biaryImg.ptr<uchar>(v, u);
+					if (dtPtr[u] == 0)
 					{
 						biPtr[0] = 255;
 						biPtr[1] = 255;
@@ -1717,9 +1856,64 @@ public:
 					}
 					else
 					{
+						if (abs(dpPtr[u] - dtPtr[u]) > param_.errorThreshold)
+						{
+							int occV = occMask.ptr<uchar>(v)[u];
+							if (occV == 0)
+							{
+								biPtr[0] = 170;
+								biPtr[1] = 170;
+								biPtr[2] = 170;
+							}
+							else
+							{
+								biPtr[0] = 0;
+								biPtr[1] = 0;
+								biPtr[2] = 0;
+							}
+
+						}
+						else
+						{
+							biPtr[0] = 255;
+							biPtr[1] = 255;
+							biPtr[2] = 255;
+						}
+					}
+				}
+			}
+
+		}
+		else
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				T* dpPtr = DP.ptr<T>(v);
+				float* dtPtr = DT.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+				{
+					uchar* biPtr = biaryImg.ptr<uchar>(v, u);
+					if (dtPtr[u] == 0)
+					{
 						biPtr[0] = 0;
 						biPtr[1] = 0;
-						biPtr[2] = 0;
+						biPtr[2] = 125;
+
+					}
+					else
+					{
+						if (abs(dpPtr[u] - dtPtr[u]) > param_.errorThreshold)
+						{
+							biPtr[0] = 255;
+							biPtr[1] = 255;
+							biPtr[2] = 255;
+						}
+						else
+						{
+							biPtr[0] = 0;
+							biPtr[1] = 0;
+							biPtr[2] = 0;
+						}
 					}
 				}
 			}
@@ -1756,7 +1950,8 @@ public:
 				else
 				{
 					bool hasTrueDisp = false;
-					for (int n = 0; n < Num; n++)
+					int num_ = dispTop.ptr<float>(v, u, Num - 1)[0];
+					for (int n = 0; n < num_; n++)
 					{
 						float* dpPtr = dispTop.ptr<float>(v, u, n);
 						if (abs(dpPtr[0] - dtV) <= param_.errorThreshold)
@@ -1807,14 +2002,14 @@ public:
 	void biaryImg(cv::Mat& DP, cv::Mat& DT, cv::Mat& biaryImg);
 
 	template <typename T, int imgNum = 1>
-	void saveDispMap(const cv::Mat& dispM, string method)
+	void saveDispMap(const cv::Mat & dispM, const Mat & trueM, string method, bool calErr = false)
 	{
 		Size size = dispM.size();
 		Mat dispMap(size, CV_8UC3, Scalar::all(0));
 
 		T disp_max = 0;
 		T disp_min = numeric_limits<T>::max();
-	/*	OMP_PARALLEL_FOR*/
+		/*	OMP_PARALLEL_FOR*/
 		for (int v = 0; v < size.height; v++)
 		{
 			for (int u = 0; u < size.width; u++)
@@ -1828,6 +2023,7 @@ public:
 		}
 
 		float distance = disp_max - disp_min;
+		float ratio = 255.0 / distance;
 		//OMP_PARALLEL_FOR
 		for (int v = 0; v < size.height; v++)
 		{
@@ -1837,7 +2033,7 @@ public:
 				uchar* disMP = dispMap.ptr<uchar>(v, u);
 				if (disP[u] >= 0)
 				{
-					float disp = 255.0 / distance * (disP[u] - disp_min);
+					float disp = ratio * (disP[u] - disp_min);
 					uchar d = static_cast<uchar>(disp);
 					disMP[0] = d;
 					disMP[1] = d;
@@ -1858,6 +2054,12 @@ public:
 						disMP[1] = 0;
 						disMP[2] = 255;
 					}
+					else if (dValue == param_.DISP_PKR)
+					{
+						disMP[0] = 0;
+						disMP[1] = 255;
+						disMP[2] = 255;
+					}
 					else if (dValue == param_.err_ip_dispV)
 					{
 						disMP[0] = 255;
@@ -1873,12 +2075,58 @@ public:
 				}
 			}
 		}
+
 		string path = param_.savePath; // ******
 		system(("IF NOT EXIST " + path + " (mkdir " + path + ")").c_str());
 		path += method + ".png";
 		imwrite(path, dispMap);
-	}
 
+		if (calErr)
+		{
+			for (int v = 0; v < size.height; v++)
+			{
+				const T* disP = dispM.ptr<T>(v);
+				const float* disT = trueM.ptr<float>(v);
+				uchar* all = I_mask[1].ptr<uchar>(v);
+				for (int u = 0; u < size.width; u++)
+				{
+					if (all[u] > 0)
+					{
+						uchar* disMP = dispMap.ptr<uchar>(v, u);
+						if (abs(disT[u] - disP[u]) > 1)
+						{
+							disMP[0] = 0;
+							disMP[1] = 0;
+							disMP[2] = 255;
+						}
+					}
+				}
+			}
+			string name = param_.savePath + method + "_err.png";
+			imwrite(name, dispMap);
+
+			//	int step2 = 0;
+			//	for (int v = 0; v < size.height; v++)
+			//	{
+			//		const uchar* armMP = arm_Mask.ptr<uchar>(v);
+			//		for (int u = 0; u < size.width; u++)
+			//		{
+			//			uchar* disP = dispMap.ptr<uchar>(v, u);
+			//			if (armMP[u] > 0)
+			//			{
+			//				disP[0] = 255;
+			//				disP[1] = 255;
+			//				disP[2] = 51;
+			//				step2++;
+			//			}
+			//		}
+			//	}
+			//	name = param_.savePath + method + "Sign.png";
+			//	imwrite(name, dispMap);
+			//	cout << "step2: " << step2 << endl;
+			//}
+		}
+	}
 	// 分别统计对遮挡点和误匹配点插值了多少，里面正确的是多少
 	void coutInterpolaterEffect(Mat& dispBef, Mat& dispAft)
 	{
@@ -1935,6 +2183,18 @@ public:
 
 	void sgm(cv::Mat& vm, bool leftFist = true);
 
+	void sgm_hori(cv::Mat& vm, bool leftFirst);
+
+	void sgm_verti(cv::Mat& vm, bool leftFirst);
+
+	void so(Mat& vm, Mat& disp, vector<Mat>& I);
+
+	void so_change(Mat& vm, Mat& DP, vector<Mat>& I);
+
+	void so_T2D(Mat& vm, Mat& DP, vector<Mat>& I);
+
+	void so_R2L(Mat& vm, Mat& DP, vector<Mat>& I);
+
 	void gen_sgm_vm(Mat& vm, vector<cv::Mat1f>& Lr, int numOfDirec);
 
 	static float min4(float a, float b, float c, float d)
@@ -1947,7 +2207,7 @@ public:
 	{
 		const int corDirThres = param_.sgm_corDifThres;  //15
 		const int reduCoeffi1 = param_.sgm_reduCoeffi1;  //4
-		const int reduCoeffi2 = param_.sgm_reduCoeffi2;  //20
+		const int reduCoeffi2 = param_.sgm_reduCoeffi2;  //20 10
 
 		int direction = 1;
 		if (!leftFirst)
@@ -1971,8 +2231,8 @@ public:
 
 			for (int d = 0; d < n; d++)
 			{
-				float P1 = param_.sgm_P1;  //1.0 
-				float P2 = param_.sgm_P2;  //3.0
+				float P1 = 1.0;  //1.0 
+				float P2 = 3.0;  //3.0
 				int D2 = 0;
 				if (u - direction * d < 0 || u + ru - direction * d < 0 
 					|| u - direction * d >= w_ || u + ru - direction * d >= w_)
@@ -1987,12 +2247,17 @@ public:
 							D2 = max(D2, abs(I_c[0].ptr<uchar>(v, u - direction * d)[c] - I_c[0].ptr<uchar>(v + rv, u + ru - direction * d)[c]));
 				}
 				
-				if (D1 >= corDirThres && D2 >= corDirThres)
-				{
-					P1 /= reduCoeffi2;
-					P2 /= reduCoeffi2;
-				}
-				else if (D1 >= corDirThres || D2 >= corDirThres)
+				//if (D1 > corDirThres && D2 > corDirThres)
+				//{
+				//	P1 /= reduCoeffi2;
+				//	P2 /= reduCoeffi2;
+				//}
+				//else if (D1 > corDirThres || D2 > corDirThres)
+				//{
+				//	P1 /= reduCoeffi1;
+				//	P2 /= reduCoeffi1;
+				//}
+				if (D1 > corDirThres)
 				{
 					P1 /= reduCoeffi1;
 					P2 /= reduCoeffi1;
@@ -2021,12 +2286,16 @@ public:
 	void BF(vector<Mat>& vm);
 
 	// refined process
-	int cal_histogram_for_HV(Mat& dispImg, int v_ancher, int u_ancher, int numThres, float ratioThre);
+	int cal_histogram_for_HV(Mat& dispImg, int v_ancher, int u_ancher, int numThres, float ratioThre, int LOR);
 	int cal_histogram_for_Tile(Mat& dispImg, int v_ancher, int u_ancher, int numThres, float ratioThre);
 	int compareArmL(int v, int u);
 
-	void LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2);
+	void LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2, cv::Mat& errMask, int LOR = 0);
+	void LRConsistencyCheck_normal(cv::Mat& D1, cv::Mat& D2, cv::Mat& errMask, int LOR = 0);
+	void LRConsistencyCheck_new(Mat& errorMask);
 	void RV_combine_BG(cv::Mat& Dp, float rv_float, int rv_s);
+	void regionVote_my(cv::Mat& Dp, float rv_ratio, int rv_s);
+	void regionVote(cv::Mat& Dp, Mat& cross);
 	void backgroundInterpolateCore(Mat& Dp, int v, int u, int* result);
 	int backgroundInterpolateCore(Mat& Dp, int v, int u);
 	int backgroundInterpolateCore_(Mat& Dp, int v, int u);
@@ -2035,6 +2304,7 @@ public:
 	int properIpolCore(Mat& Dp, int v, int u);
 	void properIpol(cv::Mat& DP, cv::Mat& I1_c);
 	void BGIpol(cv::Mat& Dp);
+	void WM(Mat& disp, Mat& mask, Mat& img);
 	void discontinuityAdjust(cv::Mat& ipol);
 	void subpixelEnhancement(cv::Mat& disparity, Mat& floatDisp);
 
@@ -2414,17 +2684,19 @@ public:
 						resultP[u] = dispCV;
 				}
 				else
-					resultP[u] = dispOV;
+					resultP[u] = dispCV;
 			}
 		}
 	}
 
-	void saveFromVm(vector<Mat> vm, string name);
+	void edgeEnhance(cv::Mat& srcImg, cv::Mat& dstImg);
+
+	void saveFromVm(vector<Mat>& vm, string name);
 
 	template <typename T, int LOR = 0>
-	void saveFromDisp(Mat disp, string name);
+	void saveFromDisp(Mat& disp, string name, bool calCsv = false, bool dispShowErr = false);
 
-private:
+public:
 
 	Parameters param_;
 	vector<Mat> I_c;
@@ -2434,6 +2706,7 @@ private:
 	vector<Mat> I_mask;  // 0为nonocc，1为all, 2为disc
 	int h_;
 	int w_;
+	int d_;
 	std::vector<cv::Mat1f> L;  // 因为float类型的范围暂时可以容下所有的单方向聚合值
 	vector<cv::Mat1f> S;  // 设置为float类型的原因同上
 	vector<Mat> census_;
@@ -2450,8 +2723,21 @@ private:
 	vector<Mat> tile_neighbor;
 	cv::Mat DP[2];
 	cv::Mat DT;
+	cv::Mat LRC_Err_Mask;
+	cv::Mat PKR_Err_Mask;
+
+	cv::Mat arm_Mask;
+	cv::Mat arm_Lst;
+	cv::Mat guideDisp;
+
+	ofstream ofs_;
 
 	vector<vector<Mat>> guideVm;
 
 	int img_counting;
 };
+
+void SolveAll(StereoMatching**& smPyr, const int PY_LVL, const float REG_LAMBDA);
+
+template <typename T>
+static bool judgeColorDif(T* target, T* refer, int thres, int channel);

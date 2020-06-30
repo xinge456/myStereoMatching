@@ -20,8 +20,6 @@
 #define OMP_PARALLEL_FOR
 #endif
 
-//#define DEBUG
-
 using namespace std;
 
 void StereoMatching::censusGrad(vector<Mat>& vm)
@@ -33,22 +31,20 @@ void StereoMatching::censusGrad(vector<Mat>& vm)
 		gradVm[i].create(3, size_vm, CV_32F);
 		censusVm[i].create(3, size_vm, CV_32F);
 	}
-	grad(gradVm, 10000);
+	grad(gradVm, 500);
 	censusCal(censusVm, 1);
 
-	if (!param_.has_initArm)
-		initArm();
-	if (!param_.has_calArms)
-		calArms();
-
 	int img_num = Do_LRConsis ? 2 : 1;
+	float lam1 = param_.lamCen;
+	float lam2 = param_.lamG;
 	for (int i = 0; i < img_num; i++)
 	{
-		gen_vm_from2vm_exp(vm[i], censusVm[i], gradVm[i], 10, 1, i);
+		gen_vm_from2vm_exp(vm[i], censusVm[i], gradVm[i], lam1, lam2, i);
 		//gen_vm_from2vm_add(vm[i], censusVm[i], gradVm[i], i);
 	}
-		
+#ifdef DEBUG
 	saveFromVm(vm, "censusGrad");
+#endif // DEBUG
 }
 
 void StereoMatching::adGrad(vector<Mat>& vm)
@@ -61,22 +57,14 @@ void StereoMatching::adGrad(vector<Mat>& vm)
 		gradVm[i].create(3, size_vm, CV_32F);
 	}
 	for (int i = 0; i < 2; i++)
-		gen_ad_sd_vm(adVm[i], i, 0, 20);
+		gen_ad_sd_vm(adVm[i], i, 0, 7);
+		//gen_ad_vm(adVm[i], I_c[0], I_c[1], 7, i);
 	grad(gradVm, 2);
 	for (int i = 0; i < 2; i++)
 	{
-		if (param_.adGrad_useAdpWgt)
-		{
-			if (!param_.has_initArm)
-				initArm();
-			if (!param_.has_calArms)
-				calArms();
-			gen_vm_from2vm_add_wgt(HVL[i], vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
-		}
-		else
-			//addWeighted(adVm[i], 0.11, gradVm[i], 1 - 0.11, 0, vm[i]);
-			gen_vm_from2vm_fixWgt(adVm[i], 0.11, gradVm[i], 1 - 0.11, vm[i]);
-			//gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
+		//addWeighted(adVm[i], 0.11, gradVm[i], 1 - 0.11, 0, vm[i]);
+		gen_vm_from2vm_fixWgt(adVm[i], 0.11, gradVm[i], 1 - 0.11, vm[i]);
+		//gen_vm_from2vm_add(vm[i], adVm[i], gradVm[i], 0.11, 1 - 0.11, i);
 	}	
 	saveFromVm(vm, "adGrad");
 }
@@ -291,10 +279,7 @@ void StereoMatching::calGrad(Mat& grad, Mat& img)
 			float* gP = grad.ptr<float>(v);
 			for (int u = 1; u < w_ - 1; u++)
 			{
-				for (int c = 0; c < 3; c++)
-				{
-					gP[u] = 0.5 * (iP[u + 1] - iP[u - 1]);
-				}
+				gP[u] = 0.5 * (iP[u + 1] - iP[u - 1]);
 			}
 			gP[0] = iP[1] - iP[0];
 			gP[w_ - 1] = iP[w_ - 1] - iP[w_ - 2];
@@ -302,27 +287,31 @@ void StereoMatching::calGrad(Mat& grad, Mat& img)
 	}
 	else
 	{
+		uchar* iP_L = NULL;
+		uchar* iP_R = NULL;
+		float* gP = NULL;
 		for (int v = 0; v < h_; v++)
 		{
-			uchar* iP = img.ptr<uchar>(v);
-			float* gP = grad.ptr<float>(v);
 			for (int u = 1; u < w_ - 1; u++)
 			{
-				float grad = 0;
-				int aft_P = (u + 1) * 3;
-				int pre_P = (u - 1) * 3;
-				for (int c = 0; c < 3; c++)
-					grad += 0.5 * (iP[aft_P + c] - iP[pre_P + c]);
-				gP[u] = 0.333333 * grad;
+				iP_L = img.ptr<uchar>(v, u - 1);
+				iP_R = img.ptr<uchar>(v, u + 1);
+				gP = grad.ptr<float>(v, u);
+				for (int c = 0; c < 3; ++c)
+				{
+					gP[c] = 0.5 * (iP_R[c] - iP_L[c]);
+				}
 			}
-			int aft_P = (w_ - 1) * 3;
+			iP_L = img.ptr<uchar>(v, 0);
+			iP_R = img.ptr<uchar>(v, 1);
+			gP = grad.ptr<float>(v, 0);
 			for (int c = 0; c < 3; c++)
-			{
-				gP[0] += iP[c + 3] - iP[c];
-				gP[w_ - 1] += iP[aft_P + c] - iP[aft_P - (3 - c)];
-			}
-			gP[0] *= 0.333333;
-			gP[w_ - 1] *= 0.333333;
+				gP[c] = iP_R[c] - iP_L[c];
+			iP_L = img.ptr<uchar>(v, w_ - 2);
+			iP_R = img.ptr<uchar>(v, w_ - 1);
+			gP = grad.ptr<float>(v, w_ - 1);
+			for (int c = 0; c < 3; c++)
+				gP[c] = iP_R[c] - iP_L[c];
 		}
 	}
 }
@@ -366,36 +355,32 @@ void StereoMatching::calGrad_y(Mat& grad, Mat& img)
 		uchar* iP_aft = NULL;
 		for (int v = 1; v < h_ - 1; v++)
 		{
-			iP_pre = img.ptr<uchar>(v - 1);
-			iP_aft = img.ptr<uchar>(v + 1);
-			gP = grad.ptr<float>(v);
 			for (int u = 0; u < w_; u++)
 			{
-				float grad = 0;
-				int pos = u * 3;
+				iP_pre = img.ptr<uchar>(v - 1, u);
+				iP_aft = img.ptr<uchar>(v + 1, u);
+				gP = grad.ptr<float>(v, u);
 				for (int c = 0; c < 3; c++)
-					grad += 0.5 * (iP_pre[pos + c] - iP_aft[pos + c]);
-				gP[u] = 0.333333 * grad;
+					gP[c] = 0.5 * (iP_aft[c] - iP_pre[c]);
+				//gP[u] = abs(iP[u + 1] - iP[u]) + abs(img.ptr<uchar>(v + 1)[u] - iP[u]);
+				//gP[u] = sqrt(pow(iP[u + 1] - iP[u], 2) + pow(img.ptr<uchar>(v + 1)[u] - iP[u], 2));
 			}
 		}
-		gP = grad.ptr<float>(0);
-		float* gP_2 = grad.ptr<float>(h_ - 1);
-		iP_pre = img.ptr<uchar>(0);
-		iP_aft = img.ptr<uchar>(1);
-		uchar* iP_pre_1 = img.ptr<uchar>(h_ - 2);
-		uchar* iP_aft_1 = img.ptr<uchar>(h_ - 1);
 		for (int u = 0; u < w_; u++)
 		{
-			float grad1 = 0;
-			float grad2 = 0;
-			int pos = u * 3;
+			gP = grad.ptr<float>(0, u);
+			iP_pre = img.ptr<uchar>(0, u);
+			iP_aft = img.ptr<uchar>(1, u);
 			for (int c = 0; c < 3; c++)
-			{
-				grad1 += iP_aft[pos + c] - iP_pre[pos + c];
-				grad2 += iP_aft_1[pos + c] - iP_pre_1[pos + c];
-			}
-			gP[u] = 0.333333 * grad1;
-			gP_2[u] = 0.333333 * grad2;
+				gP[c] = iP_aft[c] - iP_pre[c];
+		}
+		for (int u = 0; u < w_; u++)
+		{
+			gP = grad.ptr<float>(h_ - 1, u);
+			iP_pre = img.ptr<uchar>(h_ - 2, u);
+			iP_aft = img.ptr<uchar>(h_ - 1, u);
+			for (int c = 0; c < 3; c++)
+				gP[c] = iP_aft[c] - iP_pre[c];
 		}
 	}
 }
@@ -457,8 +442,56 @@ void StereoMatching::calgradvm(Mat& vm, vector<Mat>& grad, vector<Mat>& grad_y, 
 				{
 					//vP[d] = sqrt(pow(a * min(abs(grad0P[u0] - grad1P[u1]), Trunc), 2) + pow((1 - a) * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc), 2));
 					//vP[d] = sqrt(pow(min(abs(grad0P[u0] - grad1P[u1]), Trunc), 2) + pow(min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc), 2));
-					//vP[d] = 0.5 * min(abs(grad0P[u0] - grad1P[u1]), Trunc) + 0.5 * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
-					vP[d] = a * min(abs(grad0P[u0] - grad1P[u1]), Trunc) + (1 - a) * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
+					//vp[d] = 0.5 * min(abs(grad0p[u0] - grad1p[u1]), trunc) + 0.5 * min(abs(grad_y0p[u0] - grad_y1p[u1]), trunc);
+					if (param_.gradFuse_adpWgt)
+						vP[d] = a * min(abs(grad0P[u0] - grad1P[u1]), Trunc) + (1 - a) * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
+					else
+						//vP[d] = 0.5 * min(abs(grad0P[u0] - grad1P[u1]), Trunc) + 0.5 * min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
+						vP[d] = min(abs(grad0P[u0] - grad1P[u1]), Trunc) + min(abs(grad_y0P[u0] - grad_y1P[u1]), Trunc);
+				}
+			}
+		}
+	}
+}
+
+void StereoMatching::calgradvm_mag_and_phase(Mat& vm, vector<Mat>& grad_xy, vector<Mat>& grad_atan, int num, float Trunc)
+{
+	const int n = param_.numDisparities;
+	int leftCoe = 0, rightCoe = -1;
+	if (num == 1)
+		leftCoe = 1, rightCoe = 0;
+	const float PI = 3.1415926;
+	const float PI2 = 3.1415926 * 2;
+	for (int v = 0; v < h_; v++)
+	{
+		
+		for (int u = 0; u < w_; u++)
+		{
+			float* vP = vm.ptr<float>(v, u);
+			for (int d = 0; d < n; d++)
+			{
+				int uL = u + leftCoe * d;
+				int uR = u + rightCoe * d;
+				if (uL >= w_ || uR < 0)
+					vP[d] = sqrt(pow(Trunc, 2) * 2);
+				else
+				{
+					float* grad_xy_LP = grad_xy[0].ptr<float>(v, uL);
+					float* grad_xy_RP = grad_xy[1].ptr<float>(v, uR);
+					float* grad_atan_LP = grad_atan[0].ptr<float>(v, uL);
+					float* grad_atan_RP = grad_atan[1].ptr<float>(v, uR);
+					float amp = 0;// ·ùÖµ
+					float phase = 0; //ÏàÎ»
+					float sum = 0;
+					for (int c = 0; c < 3; c++)
+					{
+						amp = abs(grad_xy_LP[c] - grad_xy_LP[c]);
+						phase = abs(grad_atan_LP[c] - grad_atan_RP[c]);
+						phase = phase < PI ? phase : PI2 - phase;
+						sum += 0.12 * amp + phase;
+					}
+					vP[d] = sum / (sum + 4);
+					//vP[d] = min(cache, 2.4f);
 				}
 			}
 		}
@@ -481,7 +514,6 @@ void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float tru
 		float* vP = vm.ptr<float>(v);
 		for (int u = 0; u < w_; u++)
 		{
-			//float* vP = vm.ptr<float>(v, u);
 			for (int d = 0; d < n; d++)
 			{
 				int u0 = u + leftCoe * d;
@@ -501,7 +533,7 @@ void StereoMatching::calgradvm_1d(Mat& vm, vector<Mat>& grad, int num, float tru
 	}
 }
 
-void StereoMatching::saveFromVm(vector<Mat> vm, string name)
+void StereoMatching::saveFromVm(vector<Mat>& vm, string name)
 {
 	Mat dispMap(h_, w_, CV_16S);
 	gen_dispFromVm(vm[0], dispMap);
@@ -513,82 +545,244 @@ void StereoMatching::saveFromVm(vector<Mat> vm, string name)
 	}
 }
 
+void StereoMatching::edgeEnhance(cv::Mat& srcImg, cv::Mat& dstImg)
+{
+	if (!dstImg.empty())
+	{
+		dstImg.release();
+	}
+
+	std::vector<cv::Mat> rgb;
+
+	if (srcImg.channels() == 3)        // rgb image  
+	{
+		cv::split(srcImg, rgb);
+	}
+	else if (srcImg.channels() == 1)   // gray image  
+	{
+		rgb.push_back(srcImg);
+	}
+
+	// ·Ö±ð¶ÔR¡¢G¡¢BÈý¸öÍ¨µÀ½øÐÐ±ßÔµÔöÇ¿  
+	for (size_t i = 0; i < rgb.size(); i++)
+	{
+		cv::Mat sharpMat8U;
+		cv::Mat sharpMat;
+		cv::Mat blurMat;
+
+		// ¸ßË¹Æ½»¬  
+		cv::GaussianBlur(rgb[i], blurMat, cv::Size(7, 7), 0, 0);
+
+		// ¼ÆËãÀ­ÆÕÀ­Ë¹  
+		cv::Laplacian(blurMat, sharpMat, CV_16S);
+
+		// ×ª»»ÀàÐÍ  
+		sharpMat.convertTo(sharpMat8U, CV_8U);
+		//imshow("shape.png", sharpMat8U);
+		//waitKey(0);
+		cv::add(rgb[i], sharpMat8U, rgb[i]);
+	}
+	cv::merge(rgb, dstImg);
+}
+
 template <typename T, int LOR>
-void StereoMatching::saveFromDisp(Mat disp, string name)
+void StereoMatching::saveFromDisp(Mat& disp, string name, bool calCsv, bool dispShowErr)
 {
 	string img_num = to_string(img_counting);
 	if (LOR == 0)
 	{
-		saveDispMap<T>(disp, "d" + img_num + "isp_" + name + "LR");
+		saveDispMap<T>(disp, DT, "d" + img_num + "isp_" + name + "LR", dispShowErr);
 		saveBiary<short>("b" + img_num + "iary_" + name, disp, DT);
-		calErr<short>(disp, DT, name);
+		calErr<short>(disp, DT, name, calCsv);
 		img_counting++;
 	}
 	else
-		saveDispMap<T>(disp, "d" + to_string(img_counting - 1) + "isp_" + name + "RL");
-
+		saveDispMap<T>(disp, DT, "d" + to_string(img_counting - 1) + "isp_" + name + "RL");
 }
 
 void StereoMatching::grad(vector<Mat>& vm_grad, float Trunc)
 {
 	// ¼ÆËãÌÝ¶È
+	clock_t start = clock();
 	//const float Trunc = 4;
 	vector<Mat> grad(2);
 	vector<Mat> grad_y(2);
-	vector<Mat> grad_xy(2);
 	vector<Mat> grad_vm(2);
 	vector<Mat> grad_y_vm(2);
 	for (int i = 0; i < 2; i++)
 	{
 		grad[i].create(h_, w_, CV_32F);
 		grad_y[i].create(h_, w_, CV_32F);
-		grad_xy[i].create(h_, w_, CV_32F);
+
 		grad_vm[i].create(3, size_vm, CV_32F);
 		grad_y_vm[i].create(3, size_vm, CV_32F);
 		//Sobel(I_g[i], grad[i], CV_32F, 1, 0);
 		//Sobel(I_g[i], grad_y[i], CV_32F, 0, 1);
 		calGrad(grad[i], I_g[i]);
 		calGrad_y(grad_y[i], I_g[i]);
-		//combineXYGrad(grad[i], grad_y[i], grad_xy[i]);
-		saveDispMap<float>(grad[i], to_string(i) + "grad");
-		saveDispMap<float>(grad_y[i], to_string(i) + "grad_y");
-		//saveDispMap<float>(grad_xy[i], to_string(i) + "grad_xy");
+	
+		saveDispMap<float>(grad[i], DT, to_string(i) + "grad");
+		saveDispMap<float>(grad_y[i], DT, to_string(i) + "grad_y");
+
 	}
 
-	//¼ÆËãCBCAµÄ±Û³¤£¬ÓÃÓÚÏÂÃæ¿ØÖÆ½Ø¶ÏÖµ
+	// ¼ÆËãCBCAµÄ±Û³¤£¬ÓÃÓÚÏÂÃæ¿ØÖÆ½Ø¶ÏÖµ
 	if (!param_.has_initArm)
 		initArm();
 	if (!param_.has_calArms)
-		calArms();
-
-	if (!param_.has_initTileArm)
-		initTileArm();
-	if (!param_.has_calTileArms)
-		calTileArms();
+		calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[0], param_.cbca_crossL_out[0], param_.cbca_cTresh[0], param_.cbca_cTresh_out[0]);
 
 	// ¼ÆËã´ú¼Û¾í
 	int imgNum = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < imgNum; i++)
 	{
-		calgradvm(vm_grad[i], grad, grad_y, i, Trunc);
+		//calgradvm_mag_and_phase(vm_grad[i], grad_xy, grad_atan, i, Trunc);
+		if (param_.grad_use2direc)
+			calgradvm(vm_grad[i], grad, grad_y, i, Trunc);
+		else
+			calgradvm_1d(vm_grad[i], grad, i, Trunc);
+
 		//calgradvm_1d(vm_grad[i], grad_xy, i, Trunc);
 		//calgradvm_1d(vm_grad[i], grad, i, Trunc);
 		//calgradvm_1d(vm_grad[i], grad_y, i, Trunc);
 		//addWeighted(grad_vm[i], 0.5, grad_y_vm[i], 0.5, 0, vm_grad[i]);
 	}
+	clock_t end = clock();
+	clock_t time = end - start;
+#ifdef DEBUG
+	saveTime(time, "grad");
 	saveFromVm(vm_grad, "grad");
+#endif // DEBUG
+}
+
+void StereoMatching::grad_color(vector<Mat>& vm_grad, float Trunc)
+{
+	// ¼ÆËãÌÝ¶È
+	clock_t start = clock();
+	//const float Trunc = 4;
+	vector<Mat> grad(2);
+	vector<Mat> grad_y(2);
+	vector<Mat> grad_xy(2);
+	vector<Mat> grad_atan(2);
+	vector<Mat> grad_vm(2);
+	vector<Mat> grad_y_vm(2);
+	for (int i = 0; i < 2; i++)
+	{
+		grad[i].create(h_, w_, CV_32FC3);
+		grad_y[i].create(h_, w_, CV_32FC3);
+		grad_xy[i].create(h_, w_, CV_32FC3);
+		grad_atan[i].create(h_, w_, CV_32FC3);
+		grad_vm[i].create(3, size_vm, CV_32FC3);
+		grad_y_vm[i].create(3, size_vm, CV_32FC3);
+		//Sobel(I_g[i], grad[i], CV_32F, 1, 0);
+		//Sobel(I_g[i], grad_y[i], CV_32F, 0, 1);
+		calGrad(grad[i], I_c[i]);
+		calGrad_y(grad_y[i], I_c[i]);
+		combineXYGrad(grad[i], grad_y[i], grad_xy[i]);
+		getAtanGrad(grad[i], grad_y[i], grad_atan[i]);
+		/*saveDispMap<float>(grad[i], DT, to_string(i) + "grad");
+		saveDispMap<float>(grad_y[i], DT, to_string(i) + "grad_y");
+		saveDispMap<float>(grad_atan[i], DT, to_string(i) + "grad_atan");
+		saveDispMap<float>(grad_xy[i], DT, to_string(i) + "grad_xy");*/
+	}
+
+	// ¼ÆËãCBCAµÄ±Û³¤£¬ÓÃÓÚÏÂÃæ¿ØÖÆ½Ø¶ÏÖµ
+	//if (!param_.has_initArm)
+	//	initArm();
+	//if (!param_.has_calArms)
+	//	calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[0], param_.cbca_crossL_out[0], param_.cbca_cTresh[0], param_.cbca_cTresh_out[0]);
+
+	// ¼ÆËã´ú¼Û¾í
+	int imgNum = Do_LRConsis ? 2 : 1;
+	for (int i = 0; i < imgNum; i++)
+	{
+		calgradvm_mag_and_phase(vm_grad[i], grad_xy, grad_atan, i, Trunc);
+		//if (param_.grad_use2direc)
+		//	calgradvm(vm_grad[i], grad, grad_y, i, Trunc);
+		//else
+		//	calgradvm_1d(vm_grad[i], grad, i, Trunc);
+
+		//calgradvm_1d(vm_grad[i], grad_xy, i, Trunc);
+		//calgradvm_1d(vm_grad[i], grad, i, Trunc);
+		//calgradvm_1d(vm_grad[i], grad_y, i, Trunc);
+		//addWeighted(grad_vm[i], 0.5, grad_y_vm[i], 0.5, 0, vm_grad[i]);
+	}
+	clock_t end = clock();
+	clock_t time = end - start;
+	saveTime(time, "grad_color");
+#ifdef DEBUG
+	saveTime(time, "grad");
+	saveFromVm(vm_grad, "grad");
+#endif // DEBUG
 }
 
 void StereoMatching::combineXYGrad(Mat& grad_x, Mat& grad_y, Mat& grad_xy)
 {
-	for (int v = 0; v < h_; v++)
+	if (grad_x.channels() == 1)
 	{
-		float* xP = grad_x.ptr<float>(v);
-		float* yP = grad_y.ptr<float>(v);
-		float* xyP = grad_xy.ptr<float>(v);
-		for (int u = 0; u < w_; u++)
-			xyP[u] = sqrt(pow(xP[u], 2) + pow(yP[u], 2));
+		for (int v = 0; v < h_; v++)
+		{
+			float* xP = grad_x.ptr<float>(v);
+			float* yP = grad_y.ptr<float>(v);
+			float* xyP = grad_xy.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+				xyP[u] = sqrt(pow(xP[u], 2) + pow(yP[u], 2));
+		}
 	}
+	else
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* xP = grad_x.ptr<float>(v, u);
+				float* yP = grad_y.ptr<float>(v, u);
+				float* xyP = grad_xy.ptr<float>(v, u);
+				for (int c = 0; c < 3; c++)
+					xyP[c] = sqrt(pow(xP[c], 2) + pow(yP[c], 2));
+			}
+			
+		}
+	}
+
+}
+
+void StereoMatching::getAtanGrad(Mat& grad_x, Mat& grad_y, Mat& grad_atan)
+{
+	if (grad_x.channels() == 1)
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			float* xP = grad_x.ptr<float>(v);
+			float* yP = grad_y.ptr<float>(v);
+			float* atanP = grad_atan.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				float atanV = atan(yP[u] / xP[u]);
+				atanP[u] = atanV;
+			}
+		}
+	}
+	else
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* xP = grad_x.ptr<float>(v, u);
+				float* yP = grad_y.ptr<float>(v, u);
+				float* atanP = grad_atan.ptr<float>(v, u);
+				for (int c = 0; c < 3; c++)
+				{
+					float atanV = atan(yP[c] / xP[c]);
+					atanP[c] = atanV;
+				}
+			}
+			
+		}
+
+	}
+
 }
 
 void StereoMatching::truncAD(vector<Mat>& vm)
@@ -614,18 +808,20 @@ void StereoMatching::censusCal(vector<Mat>& vm_census, float truncRatio)
 {
 	cout << "start censusCal" << endl;
 	clock_t start = clock();
-	const int win_N = 2;
+	const int win_N = 1;
 
 	vector<vector<int>> census_W(win_N);
 	
 	census_W[0] = {3, 4};
 	//census_W[0] = {2, 2};
-	census_W[1] = { 5, 5 };
+	//census_W[0] = {2, 2};
+	//census_W[1] = { 5, 5 };
 
 	int imgNum = Do_LRConsis ? 2 : 1;
 	Mat dispMap(h_, w_, CV_16S);
 	int channels = param_.census_channel;  // 1
-	int codeLength[win_N], varNum[win_N], * size_c[win_N];
+	int codeLength[win_N], varNum[win_N], ** size_c;
+	size_c = new int* [2];
 	vector<vector<Mat>> censusCode(win_N);
 
 	for (int i = 0; i < win_N; i++)
@@ -646,6 +842,8 @@ void StereoMatching::censusCal(vector<Mat>& vm_census, float truncRatio)
 		delete[] size_c[i];
 		size_c[i] = NULL;
 	}
+	delete[] size_c;
+	size_c = NULL;
 
 	//gen_cen_vm_<0>(vm_census[0]);
 	//gen_cen_vm_<1>(vm_census[1]);
@@ -675,18 +873,6 @@ void StereoMatching::censusCal(vector<Mat>& vm_census, float truncRatio)
 		//genCensusCode<float>(grad, censusCode[2], census_W[2][0], census_W[2][1]);
 	}
 
-	// xxxxxx
-		//¼ÆËãCBCAµÄ±Û³¤£¬ÓÃÓÚÏÂÃæcensus´°¿ÚµÄÑ¡Ôñ
-	if (!param_.has_initArm)
-		initArm();
-	if (!param_.has_calArms)
-		calArms();
-
-	if (!param_.has_initTileArm)
-		initTileArm();
-	if (!param_.has_calTileArms)
-		calTileArms();
-
 	for (int i = 0; i < imgNum; i++)
 	{
 		gen_cenVM_XOR(censusCode[0], vm_census[i], codeLength[0], truncRatio, i);  // 0
@@ -699,8 +885,8 @@ void StereoMatching::censusCal(vector<Mat>& vm_census, float truncRatio)
 	cout << "finish census cal" << endl;
 	clock_t end = clock();
 	clock_t time = end - start;
-	saveTime(time, "Census");
 #ifdef DEBUG 
+	saveTime(time, "Census");
 	saveFromVm(vm_census, "census");
 #endif
 }
@@ -716,10 +902,10 @@ void StereoMatching::ADCensusCal()
 		vm_asd[num].create(3, size_vm, CV_32F);
 		vm_census[num].create(3, size_vm, CV_32F);
 	}
-	asdCal(vm_asd, "AD", imgNum, 20);
+	asdCal(vm_asd, "AD", imgNum, 1000);
 	//bt_color(vm_asd);
 	//BF(vm_asd, DT);
-	censusCal(vm_census, 0.5);
+	censusCal(vm_census, 1);
 	adCensus(vm_asd, vm_census);
 	cout << "finish ADCensus cal" << endl;
 	clock_t end = clock();
@@ -740,10 +926,13 @@ void StereoMatching::ADCensusGrad()
 		vm_census[num].create(3, size_vm, CV_32F);
 		vm_grad[num].create(3, size_vm, CV_32F);
 	}
-	asdCal(vm_asd, "AD", imgNum, 10);
+	//asdCal(vm_asd, "AD", imgNum, 10); 
+	asdCal(vm_asd, "AD", imgNum, 255); 
 	//BF(vm_asd, DT);
-	censusCal(vm_census, 0.3);
-	grad(vm_grad, 2); //xxxx
+	//censusCal(vm_census, 0.3);
+	censusCal(vm_census, 1);
+	//grad(vm_grad, 2); //xxxx
+	grad(vm_grad, 500); //xxxx
 	adCensuGradCombine(vm_asd, vm_census, vm_grad);
 	//adCensus(vm_asd, vm_census);
 	cout << "finish ADCensusGrad cal" << endl;
@@ -755,6 +944,9 @@ void StereoMatching::ADCensusGrad()
 
 void StereoMatching::costCalculate()
 {
+	clearErrTxt();  // Çå¿ÕÎó²îtxt
+	clearTimeTxt();  // Çå¿ÕÊ±¼ätxt
+
 	string::size_type idx;
 	string::size_type idy;
 	int imgNum = Do_LRConsis ? 2 : 1;
@@ -767,7 +959,8 @@ void StereoMatching::costCalculate()
 		bt(vm);
 
 	else if (costcalculation == "grad")
-		grad(vm, 2);
+		grad(vm, 500);
+		//grad_color(vm, 7.2);
 
 	else if (costcalculation == "TruncAD")
 		truncAD(vm);
@@ -794,28 +987,37 @@ void StereoMatching::costCalculate()
 		ADCensusGrad();
 
 	// BF ºÐÊ½ÂË²¨
-	idx = aggregation.find("BF");
-	if (idx != string::npos)
+	//idx = aggregation.find("BF");
+	//if (idx != string::npos)
+	//	BF(vm);
+	if (aggregation == "BF")
 		BF(vm);
 
 	//AWS
-	idx = aggregation.find("AWS");
-	if (idx != string::npos)
+	else if (aggregation == "AWS")
 		AWS();
 
 	// cost aggregation
 	//CBCA
-	idx = aggregation.find("CBCA");
-	if (idx != string::npos)
+	else if (aggregation == "CBCA")
 		CBCA();
 
-	idx = aggregation.find("guideFilter");
-	if (idx != string::npos)
-		guideFilter();
+	else if (aggregation == "GF")
+	{
+		GF();
+	}
 
+	else if (aggregation == "FIF")
+		//FIF();
+		FIF_Improve();
 
-	cout << "costCalculate finished" << endl;
-	cout << endl;
+	else if (aggregation == "NL")
+		NL();
+
+	else if (aggregation == "GFNL")
+		GFNL();
+	std::cout << "finish cost aggregation" << endl;
+	std::cout << endl;
 }
 
 void StereoMatching::BF(vector<Mat>& vm)
@@ -831,204 +1033,481 @@ void StereoMatching::BF(vector<Mat>& vm)
 
 	for (int i = 0; i < imgNum; i++)
 	{
-		symmetry_borderCopy_3D(vm[i], vm_borderIp, W_V_B, W_V_B, W_U_B, W_U_B);  // 
-		BF_BI(vm_borderIp, vm[i], W_V_B, W_U_B);
+		//symmetry_borderCopy_3D(vm[i], vm_borderIp, W_V_B, W_V_B, W_U_B, W_U_B);  // 
+		//BF_BI(vm_borderIp, vm[i], W_V_B, W_U_B);
+		boxFilter(vm[i], vm[i], -1, Size(12, 12));
 	}
 #ifdef DEBUG
 	saveFromVm(vm, "BF");
 #endif // DEBUG
 }
 
+
 void StereoMatching::dispOptimize()
 {
-	// ÊÓ²îÓÅ»¯
-	if (Do_sgm)
-	{
-		bool leftFirst = false;
-		int loopNum = 1;
-		if (Do_LRConsis)
-			loopNum = 2;
-		for (int i = 0; i < loopNum; i++)
-		{
-			clock_t start = clock();
-			leftFirst = !leftFirst;
-			sgm(vm[i], leftFirst);
-			clock_t end = clock();
-			clock_t time = end - time;
-			saveTime(time, "sgm" + to_string(i));
-		}
-	}
 	DP[0].create(h_, w_, CV_16S);
 	DP[1].create(h_, w_, CV_16S);
 
-	int img_num = Do_LRConsis ? 2 : 1;
-	if (param_.Do_vmTop)
+	if (optimization == "sgm")
 	{
-		int sizeVmTop[] = { h_, w_, param_.vmTop_Num + 1, 2 };
-		Mat topDisp(4, sizeVmTop, CV_32F);
-		for (int i = 0; i < img_num; i++)
+		int num = 1;
+		if (Do_refine && Do_LRConsis)
+			num = 2;
+		for (int i = 0; i < num; i++)
 		{
-			Mat vm_copy = vm[i].clone();
-			selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
-			genDispFromTopCostVm2(topDisp, DP[i]);
+			//clock_t start = clock();
+			bool leftFirst = i == 0 ? true : false;
+			sgm(vm[i], leftFirst);
+			//Mat vm_res = vm[i].clone();
+			//sgm_verti(vm[i], leftFirst);
+			//sgm_hori(vm[i], leftFirst);
+
+			//for (int v = 0; v < h_; v++)
+			//{
+			//	for (int u = 0; u < w_; u++)
+			//	{
+			//		float* vmP = vm[i].ptr<float>(v, u);
+			//		float min = numeric_limits<float>::max();
+			//		for (int d = 0; d < d_; d++)
+			//		{
+			//			if (vmP[d] < min)
+			//				min = vmP[d];
+			//		}
+			//		for (int d = 0; d < d_; d++)
+			//		{
+			//			vmP[d] -= min;
+			//		}
+			//	}
+			//}
+			//vm[i] = vm[i] * 0.025 + vm_res;
+			//sgm_hori(vm[i], leftFirst);
+			//sgm_verti(vm[i], leftFirst);
+			//clock_t end = clock();
+			//clock_t time = end - time;
+			//saveTime(time, "sgm" + to_string(i));
 		}
-
 	}
-	else
-		for (int i = 0; i < img_num; i++)
-			gen_dispFromVm(vm[i], DP[i]);
 
-	string dispCalMethod = param_.Do_vmTop ? "wta_vmTop" : "wta";
-	string name = Do_sgm ? "so" : dispCalMethod;
-//#ifdef DEBUG
-	saveFromDisp<short, 0>(DP[0], name);
-	saveFromDisp<short, 1>(DP[1], name);
-//#endif // DEBUG
-	if (Do_sgm)
-		cout << "scanline optimization finished" << endl << endl;
-	else
-		cout << "wta finished" << endl << endl;
+	else if(optimization == "so")
+	{
+		int num = Do_LRConsis ? 2 : 1;
+		for (int i = 0; i < num; i++)
+		{
+			Mat vm_res = vm[i].clone();
+			//so_T2D(vm_res, DP[i], I_c);
+			so(vm[i], DP[i], I_c);
+			//so_change(vm[i], DP[i], I_c);
+			//so_R2L(vm[i], DP[i], I_c);
+			if (i == 0)
+				saveFromDisp<short, 0>(DP[0], "so", true, true);
+			else
+				saveFromDisp<short, 1>(DP[1], "so");
+		}
+	}
+
+	if (optimization == "sgm" || optimization == "")
+	{
+		int num = Do_refine && Do_LRConsis ? 2 : 1;
+		if (param_.Do_vmTop)
+		{
+			clock_t start = clock();
+			int sizeVmTop[] = { h_, w_, param_.vmTop_Num + 1, 2 };
+			Mat topDisp(4, sizeVmTop, CV_32F);
+			for (int i = 0; i < num; i++)
+			{
+				Mat vm_copy = vm[i].clone();
+				selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
+				genDispFromTopCostVm2(topDisp, DP[i]);
+			}
+			clock_t end = clock();
+			clock_t time = end - start;
+			saveTime(time, "topVm");
+		}
+		else
+			for (int i = 0; i < num; i++)
+				gen_dispFromVm(vm[i], DP[i]);
+#ifdef DEBUG
+		string name = param_.Do_vmTop ? "vmTop" : "wta";
+		saveFromDisp<short, 0>(DP[0], name, true, true);
+		saveFromDisp<short, 1>(DP[1], name);
+#endif // DEBUG
+	}
+	cout << "disparity computation: " << optimization << " done" << endl;
 }
 
 void StereoMatching::refine()
-{
-	// ÊÓ²îÏ¸»¯
-	if (StereoMatching::Do_LRConsis)  // LR consisency check
-	{
-		clock_t start = clock();
-		LRConsistencyCheck(DP[0], DP[1]);
-		clock_t end = clock();
-		clock_t time = end - start;
-#ifdef DEBUG
-		saveTime(time, "LRC");
-#endif
+{	
+	// »ùÓÚ¡°Fast stereo matching using adaptive guided filtering¡±ÖÐµÄ·½·¨
+#ifdef USE_RECONCV
 
+	if (true)
+	{
+		// ×óÓÒÒ»ÖÂÐÔ¼ì²â£¬ÕÒ³ö´íÎóµã
+		Mat errMask(h_, w_, CV_8U, Scalar::all(1));
+		LRConsistencyCheck_new(errMask);
+		// ÖØÐÂ¹¹ÔìÆ¥Åä´ú¼Û¾í
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* errP = errMask.ptr<uchar>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				float* cP = vm[0].ptr<float>(v, u);
+				if (errP[u] == 0)
+				{
+					for (int d = 0; d < d_; d++)
+						cP[d] = 0;
+				}
+				else
+				{
+					float cMin = numeric_limits<float>::max();
+					for (int d = 0; d < d_; d++)
+					{
+						if (cP[d] < cMin)
+							cMin = cP[d];
+					}
+					for (int d = 0; d < d_; d++)
+					{
+						cP[d] -= cMin;
+					}
+				}
+			}
+		}
+
+		Mat Img_tem;
+		I_c[0].convertTo(Img_tem, CV_32F, 1 / 255.0);
+		Mat wgt_hor(h_ - 1, w_ - 1, CV_32F);
+		Mat wgt_ver(h_ - 1, w_ - 1, CV_32F);
+		// ¼ÆËãË®Æ½ºÍ´¹Ö±Á½Á½µã¼äµÄÈ¨ÖØ
+		for (int v = 0; v < h_ - 1; v++)
+		{
+			float* wgt_hP = wgt_hor.ptr<float>(v);
+			float* wgt_vP = wgt_ver.ptr<float>(v);
+			for (int u = 0; u < w_ - 1; u++)
+			{
+				float* IP = Img_tem.ptr<float>(v, u);
+				float* IP_nextU = Img_tem.ptr<float>(v, u + 1);
+				float* IP_nextV = Img_tem.ptr<float>(v + 1, u);
+				//float clrDif_h = 0;
+				//float clrDif_v = 0;
+				//for (int c = 0; c < 3; c++)
+				//{
+				//	clrDif_h = max(abs(IP_nextU[c] - IP[c]), clrDif_h);
+				//	clrDif_v = max(abs(IP_nextV[c] - IP[c]), clrDif_v);
+				//}
+				//wgt_hP[u] = exp(-clrDif_h / 0.2);
+				//wgt_vP[u] = exp(-clrDif_v /  0.2);
+				wgt_hP[u] = pow(IP_nextU[0] - IP[0], 2) + pow(IP_nextU[1] - IP[1], 2) + pow(IP_nextU[2] - IP[2], 2);
+				wgt_vP[u] = pow(IP_nextV[0] - IP[0], 2) + pow(IP_nextV[1] - IP[1], 2) + pow(IP_nextV[2] - IP[2], 2);
+				wgt_hP[u] = exp(-wgt_hP[u] / (0.08 * 0.08));  //0.08 ¡°Full-Image Guided Filtering for Fast Stereo Matching¡±
+				wgt_vP[u] = exp(-wgt_vP[u] / (0.08 * 0.08));
+			}
+		}
+
+		Mat* calcu1 = new Mat[d_];
+		Mat* calcu2 = new Mat[d_];
+		Mat* calcu3 = new Mat[d_];
+		for (int d = 0; d < d_; d++)
+		{
+			calcu1[d] = Mat(h_, w_, CV_32F, Scalar::all(0));
+			calcu2[d] = Mat(h_, w_, CV_32F, Scalar::all(0));
+			calcu3[d] = Mat(h_, w_, CV_32F, Scalar::all(0));
+		}
+		// Ë®Æ½´ú¼Û»ýÀÛ£¨´Ó×óµ½ÓÒ£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu = calcu1[d];
+			for (int v = 0; v < h_; v++)
+			{
+				float* wgt_h = wgt_hor.ptr<float>(v);
+				float* cP = calcu.ptr<float>(v);
+				cP[0] = vm[0].ptr<float>(v, 0)[d];
+				for (int u = 1; u < w_; u++)
+				{
+					cP[u] = vm[0].ptr<float>(v, u)[d] + cP[u - 1] * wgt_h[u - 1];
+				}
+			}
+		}
+		// Ë®Æ½´ú¼Û»ýÀÛ£¨´ÓÓÒµ½×ó£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu = calcu2[d];
+			for (int v = 0; v < h_; v++)
+			{
+				float* wgt_h = wgt_hor.ptr<float>(v);
+				float* cP = calcu.ptr<float>(v);
+				cP[w_ - 1] = vm[0].ptr<float>(v, w_ - 1)[d];
+				for (int u = w_ - 2; u >= 0; u--)
+				{
+					cP[u] = vm[0].ptr<float>(v, u)[d] + cP[u + 1] * wgt_h[u];
+				}
+			}
+		}
+		// Ë®Æ½ºÍ
+		for (int d = 0; d < d_; d++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				float* c1 = calcu1[d].ptr<float>(v);
+				float* c2 = calcu2[d].ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+				{
+					c1[u] = c1[u] + c2[u] - vm[0].ptr<float>(v, u)[d];
+				}
+			}
+		}
+
+		// ´¹Ö±´ú¼Û»ýÀÛ£¨´ÓÉÏµ½ÏÂ£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu_ori = calcu1[d];
+			Mat calcu_new = calcu2[d];
+			for (int u = 0; u < w_; u++)
+				calcu_new.ptr<float>(0)[u] = calcu_ori.ptr<float>(0)[u];
+			for (int v = 1; v < h_; v++)
+			{
+				float* wgt_v = wgt_ver.ptr<float>(v - 1);
+				float* cP_ori = calcu_ori.ptr<float>(v);
+				float* cP_new_pre = calcu_new.ptr<float>(v - 1);
+				float* cP_new = calcu_new.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+					cP_new[u] = cP_new_pre[u] * wgt_v[u] + cP_ori[u];
+			}
+		}
+		// ´¹Ö±´ú¼Û»ýÀÛ£¨´ÓÏÂµ½ÉÏ£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu_ori = calcu1[d];
+			Mat calcu_new = calcu3[d];
+			for (int u = 0; u < w_; u++)
+				calcu_new.ptr<float>(h_ - 1)[u] = calcu_ori.ptr<float>(h_ - 1)[u];
+			for (int v = h_ - 2; v >= 0; v--)
+			{
+				float* wgt_v = wgt_ver.ptr<float>(v);
+				float* cP_ori = calcu_ori.ptr<float>(v);
+				float* cP_new_pre = calcu_new.ptr<float>(v + 1);
+				float* cP_new = calcu_new.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+					cP_new[u] = cP_new_pre[u] * wgt_v[u] + cP_ori[u];
+			}
+		}
+		// ´¹Ö±¼ÓºÍ
+		for (int d = 0; d < d_; d++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				float* c1 = calcu2[d].ptr<float>(v);
+				float* c2 = calcu3[d].ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+				{
+					c1[u] = c1[u] + c2[u] - calcu1[d].ptr<float>(v)[u];
+				}
+			}
+		}
+		// Ö´ÐÐWTA
+		Mat dp_tem(h_, w_, CV_16S);
+		for (int v = 0; v < h_; v++)
+		{
+			short* dP = dp_tem.ptr<short>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				float cmin = numeric_limits<float>::max();
+				int d_tar = -1;
+				for (int d = 0; d < d_; d++)
+				{
+					float c = calcu2[d].ptr<float>(v)[u];
+					if (c < cmin)
+					{
+						cmin = c;
+						d_tar = d;
+					}
+				}
+				dP[u] = d_tar;
+			}
+		}
+
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* eP = errMask.ptr<uchar>(v);
+			short* dP = DP[0].ptr<short>(v);
+			short* dp_temP = dp_tem.ptr<short>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				if (eP[u] == 0)
+					dP[u] = dp_temP[u];
+			}
+		}
+		delete[] calcu1;
+		delete[] calcu2;
+		delete[] calcu3;
+		calcu1 = NULL;
+		calcu2 = NULL;
+		calcu3 = NULL;
+		saveFromDisp<short>(DP[0], "reconstrunct cost vm and tree aggregation");
 	}
+#else
+// ÊÓ²îÏ¸»¯
+Mat Dp_res;
+
+//clock_t start = clock();
+//for (int i = 0; i < 3; i++)
+//{
+	//clock_t start_ = clock();
+	//regionVote(DP[0], HVL[0]);
+	//regionVote(DP[1], HVL[1]);
+	//clock_t end_ = clock();
+	//saveTime(end_ - start_, "rv" + to_string(i));
+//}
+//clock_t end = clock();
+//clock_t time = end - start;
+//saveTime(time, "rv");
+
+if (StereoMatching::Do_LRConsis)  // LR consisency check
+{
+	clock_t start = clock();
+	//LRConsistencyCheck(DP[0], DP[1], LRC_Err_Mask);
+	LRConsistencyCheck_normal(DP[0], DP[1], LRC_Err_Mask);
+	clock_t end = clock();
+	clock_t time = end - start;
 #ifdef DEBUG
+	saveTime(time, "LRC");
 	saveFromDisp<short>(DP[0], "od");
 #endif
 	std::cout << "LRConsistencyCheck finished" << endl;
+}
 
-	string filename_P;
-	Mat dispChange(h_, w_, CV_16S);
+if (StereoMatching::Do_calPKR)
+{
+	calPKR(vm[0], PKR_Err_Mask);
+	signDp_UsingPKR(DP[0], PKR_Err_Mask);
+	saveFromDisp<short>(DP[0], "PKR");
+}
 
-	Mat Dp_res;
+string filename_P;
+Mat dispChange(h_, w_, CV_16S);
 
-	if (StereoMatching::Do_regionVote)
+
+
+if (StereoMatching::Do_regionVote)
+{
+	Dp_res = DP[0].clone();
+	if (!param_.has_initArm)
+		initArm();
+	if (!param_.has_calArms)
+		calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[0], param_.cbca_crossL_out[0], param_.cbca_cTresh[0], param_.cbca_cTresh_out[0]);
+
+	//float rv_ratio[] = {0.4, 0.5, 0.6, 0.7};
+	//float rv_ratio[] = {0.4, 0.7, 0.5, 0.4};
+	//int rv_s[] = {RV_S, RV_S, RV_S, RV_S};
+	float rv_ratio[] = { 0.4, 0.4, 0.4, 0.4 };
+	int rv_s[] = { 20, 20, 20, 20 };
+
+	for (int i = 0; i < param_.region_vote_nums; i++)  // region vote
 	{
-		Dp_res = DP[0].clone();
-		//string::size_type idx;
-		//idx = aggregation.find("CBCA");
-		if (!param_.has_calArms)  // Èç¹ûÃ»ÓÐÖ´ÐÐCBCA£¬Ôò´Ë´¦Ðèµ¥¶ÀÉú³ÉHVL[0]
-		{
-			const uchar L0 = param_.cbca_crossL[0];  // 17
-			const uchar L_out0 = param_.cbca_crossL_out[0];
-			const uchar C_D = param_.Cross_C;  // 20
-			const uchar C_D_out = 6;
-			const uchar minL = param_.cbca_minArmL;  // 1
-			HVL.resize(2);
-			int HVL_size[] = { h_, w_, 5 };
-			HVL[0].create(3, HVL_size, CV_16U);
-			int channels = cbca_genArm_isColor ? 3 : 1;
-			calHorVerDis(0, channels, L0, L_out0, C_D, C_D_out, minL);
-			param_.has_calArms = 1;
-		}
-
-		float rv_ratio[] = {0.4, 0.4, 0.4, 0.4};
-		//float rv_ratio[] = {0.4, 0.5, 0.6, 0.7};
-		//float rv_ratio[] = {0.7, 0.6, 0.5, 0.4};
-		int rv_s[] = {20, 20, 20, 20};
-		for (int i = 0; i < param_.region_vote_nums; i++)  // region vote
-		{
-			clock_t start = clock();
-			RV_combine_BG(DP[0], rv_ratio[i], rv_s[i]);
-			//signDispChange_forRV(Dp_res, DP[0], DT, I_mask[0], dispChange);
-			//filename_P = "dispRVChange" + to_string(i + 1);
-			//saveDispMap<short>(dispChange, filename_P);
-			clock_t end = clock();
-			clock_t time = end - start;
-			cout << "RV" + to_string(i) << " time" << time << endl;
-#ifdef DEBUG
-			string name = "RV" + to_string(i);
-			saveTime(time, name);
-			saveFromDisp<short>(DP[0], name);
-#endif
-			cout << "region_vote iteration:" + to_string(i) + " finished";
-		}
-		//coutInterpolaterEffect(Dp_res, DP[0]);
-		//Dp_res = DP[0].clone();
-	}
-
-	if (StereoMatching::Do_cbbi) //cut-based border interpolate  
-	{
-		//Mat Dp_res = DP[0].clone();
-		cbbi(DP[0]);
-		signDispChange_forRV(Dp_res, DP[0], DT, I_mask[1], dispChange);
-		saveDispMap<short>(dispChange, "dispCBBIChange.png");
-		saveFromDisp<short>(DP[0], "CBBI");
-	}
-
-	if (StereoMatching::Do_bgIpol)
-	{
-		Dp_res = DP[0].clone();
-		for (int i = 0; i < param_.region_vote_nums; i++)  // region vote
-			BGIpol(DP[0]);
-		coutInterpolaterEffect(Dp_res, DP[0]);
-	}
-
-	if (StereoMatching::Do_properIpol)
-	{
-		Dp_res = DP[0].clone();
 		clock_t start = clock();
-		for (int i = 0; i < param_.region_vote_nums; i++)  // region vote
-			properIpol(DP[0], I_c[0]);  // proper interpolation
+		regionVote_my(DP[0], rv_ratio[i], rv_s[i]);
+		//RV_combine_BG(DP[0], rv_ratio[i], rv_s[i]);
+		//signDispChange_forRV(Dp_res, DP[0], DT, I_mask[0], dispChange);
+		//filename_P = "dispRVChange" + to_string(i + 1);
+		//saveDispMap<short>(dispChange, filename_P);
 		clock_t end = clock();
 		clock_t time = end - start;
-		cout << "PI time: " << time << endl;
+		cout << "RV" + to_string(i) << " time" << (int)time << endl;
+		string name = "RV" + to_string(i);
+		saveTime(time, name);
 #ifdef DEBUG
-		saveTime(time, "PI");
-		saveFromDisp<short>(DP[0], "pi");
-#endif // DEBUG
-		cout << "properInterpolation finished" << endl;
-		//coutInterpolaterEffect(Dp_res, DP[0]);
-	}
-
-	if (StereoMatching::Do_discontinuityAdjust)
-	{
-		discontinuityAdjust(DP[0]);  // discontinutity adjustment
-#ifdef DEBUG
-		saveFromDisp<short>(DP[0], "da");
-#endif // DEBUG
-		cout << "discontinutyAdjustment finished" << endl;
-	}
-
-	if (StereoMatching::Do_subpixelEnhancement)
-	{
-		Mat SE(h_, w_, CV_32F);
-		subpixelEnhancement(DP[0], SE);  // subpixel enhancement
-#ifdef DEBUG
-		saveFromDisp<float>(DP[0], "se");
-#endif // DEBUG
-		cout << "subpixelEnhancement finished" << endl;
-		medianBlur(SE, SE, 3);
-#ifdef DEBUG
-		saveFromDisp<float>(DP[0], "mb");
+		//string name = "RV" + to_string(i);
+		//saveTime(time, name);
+		saveFromDisp<short>(DP[0], name);
 #endif
-		cout << "medianBlur finished" << endl;
+		cout << "region_vote iteration:" + to_string(i) + " finished";
 	}
+	//coutInterpolaterEffect(Dp_res, DP[0]);
+	//Dp_res = DP[0].clone();
+}
 
-	if (StereoMatching::Do_lastMedianBlur)
-	{
-		medianBlur(DP[0], DP[0], 3);
-		//regionVoteForWholeDispImg(DP[0]);
+if (StereoMatching::Do_cbbi) //cut-based border interpolate  
+{
+	//Mat Dp_res = DP[0].clone();
+	cbbi(DP[0]);
+	signDispChange_forRV(Dp_res, DP[0], DT, I_mask[1], dispChange);
+	saveDispMap<short>(dispChange, DT, "dispCBBIChange.png");
+	saveFromDisp<short>(DP[0], "CBBI");
+}
+
+if (StereoMatching::Do_properIpol)
+{
+	Dp_res = DP[0].clone();
+	clock_t start = clock();
+	for (int i = 0; i < param_.region_vote_nums; i++)  // region vote
+		properIpol(DP[0], I_c[0]);  // proper interpolation
+	clock_t end = clock();
+	clock_t time = end - start;
+	cout << "PI time: " << time << endl;
 #ifdef DEBUG
-		saveFromDisp<short>(DP[0], "mb");
-#endif
-		cout << "medianBlur finished" << endl;
-	}
+	saveTime(time, "PI");
+	saveFromDisp<short>(DP[0], "pi");
+#endif // DEBUG
+	cout << "properInterpolation finished" << endl;
+	//coutInterpolaterEffect(Dp_res, DP[0]);
+}
 
-	cout << "disparity refine finished" << endl;
-	cout << endl;
+if (StereoMatching::Do_bgIpol)
+{
+	//Dp_res = DP[0].clone();
+	//for (int i = 0; i < param_.region_vote_nums; i++)  // region vote
+	BGIpol(DP[0]);
+	saveFromDisp<short>(DP[0], "BG", false, false);
+#ifdef DEBUG
+	saveFromDisp<short>(DP[0], "BG", false, false);
+#endif // DEBUG
+
+	//coutInterpolaterEffect(Dp_res, DP[0]);
+}
+
+if (StereoMatching::Do_WM)
+{
+	WM(DP[0], LRC_Err_Mask, I_c[0]);
+	saveFromDisp<short>(DP[0], "WM", false, false);
+}
+
+if (StereoMatching::Do_discontinuityAdjust)
+{
+	discontinuityAdjust(DP[0]);  // discontinutity adjustment
+#ifdef DEBUG
+	saveFromDisp<short>(DP[0], "da");
+#endif // DEBUG
+	cout << "discontinutyAdjustment finished" << endl;
+}
+
+if (StereoMatching::Do_subpixelEnhancement)
+{
+	Mat SE(h_, w_, CV_32F);
+	subpixelEnhancement(DP[0], SE);  // subpixel enhancement
+#ifdef DEBUG
+	saveFromDisp<float>(DP[0], "se");
+#endif // DEBUG
+	cout << "subpixelEnhancement finished" << endl;
+	medianBlur(SE, SE, 3);
+#ifdef DEBUG
+	saveFromDisp<float>(DP[0], "mb");
+#endif
+	cout << "medianBlur finished" << endl;
+}
+
+if (StereoMatching::Do_lastMedianBlur)
+{
+	medianBlur(DP[0], DP[0], 3);
+	//regionVoteForWholeDispImg(DP[0]);
+	saveFromDisp<short>(DP[0], "mb", false, false);
+#ifdef DEBUG
+	
+#endif
+	cout << "medianBlur finished" << endl;
+}
+
+cout << "disparity refine finished" << endl;
+cout << endl;
+#endif // USE_RECONCV
 }
 
 // Ëã·¨ÃèÊö¼ûÂÛÎÄ
@@ -1038,10 +1517,9 @@ void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 	if (param_.vmTop_method == 0)
 	{
 		clock_t start = clock();
-		clock_t time_sum = 0, time_sum2 = 0, time_sum3 = 0, time_sum4 = 0;
-		const int disp_DifThres = 10;
-		const int disp_DifThres2 = 14;
-		const int disp_DifThres3 = 5;
+		const int disp_DifThres = param_.ts; // 10
+		const int disp_DifThres2 = 14; // 14
+		const int disp_DifThres3 = 1000; // 5
 		const int num_candi = topDisp.size[2];  // Éè¶¨µÄºòÑ¡ÊÓ²îÊý¼ÓÒ»¸öÊµ¼ÊºòÑ¡ÊÓ²îÖ¸Ê¾Î»
 		map<float, int> dispCost_container;
 		map<float, int>::iterator iter_dispCost;
@@ -1049,54 +1527,84 @@ void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 		map<int, int>::iterator iter_disp_num;
 		map<int, float> disp__cost;
 		map<int, float>::iterator iter_disp_cost;
-		unsigned __int64 step = 0;
-		unsigned __int64 step2 = 0;
-		unsigned __int64 mapsize = 0;
 
-		int neigh_v[] = { 0, 0, 1, -1 };
-		int neigh_u[] = { -1, 1, 0, 0 };
+		// l,u,r,d,lu,rd,ru,ld
+		int neigh_v[] = { 0, -1, 0, 1, -1, 1, -1, 1};
+		int neigh_u[] = { -1, 0, 1, 0, -1, 1, 1, -1};
+		int neigh_len = 8;
+	
 		for (int v = 0; v < h_; v++)
 		{
 			short* disP = disp.ptr<short>(v);
 			for (int u = 0; u < w_; u++)
 			{
-				if (u == 0 || v == 0)
+				if (u == 0 || v == 0)  // Çé¿ö1
 					disP[u] = topDisp.ptr<float>(v, u, 0)[0];
 				else
 				{
 					int n = topDisp.ptr<float>(v, u, num_candi - 1)[0];
-					if (n == 1)
+					if (n == 1) // Çé¿ö1
 						disP[u] = topDisp.ptr<float>(v, u, 0)[0];
 					else if (n > 1)
-					{
+					{ 
+						//bool use_neigh[] = { false, false, false, false, false, false, false, false };
+						//bool use_neigh[] = { false, false, false, false, true, true, true, true };
+						bool use_neigh[] = { true, true, true, true, true, true, true, true };
+						//bool use_neigh[] = { true, true, true, true, false, false, false, false };
 						int disp_pre1 = disP[u - 1];
 						int disp_pre2 = disp.ptr<short>(v - 1)[u];
+						int disp_r = 10000;
+						int disp_d = 10000;
+						int disp_lt = disp.ptr<short>(v - 1)[u - 1];
+						int disp_rd = 10000;
+						int disp_rt = 10000;
+						int disp_ld = 10000;
+						if (u != w_ - 1)
+						{
+							disp_r = topDisp.ptr<float>(v, u + 1, 0)[0];
+							//disp_rt = topDisp.ptr<float>(v - 1, u + 1, 0)[0];
+							disp_rt = disp.ptr<short>(v - 1)[u + 1];
+						}
+						if (v != h_ - 1)
+						{
+							disp_d = topDisp.ptr<float>(v + 1, u, 0)[0];
+							disp_ld = topDisp.ptr<float>(v + 1, u - 1, 0)[0];
+						}
+						if (u != w_ - 1 && v != h_ - 1)
+							disp_rd = topDisp.ptr<float>(v + 1, u + 1, 0)[0];
 						clock_t start1 = clock();
 						for (int i = 0; i < n; i++)
 						{
 							int d0 = topDisp.ptr<float>(v, u, i)[0];
 							float c0 = topDisp.ptr<float>(v, u, i)[1];
-							for (int j = i + 1; j < n; j++)
+							if (!param_.vmTop_hasCir2)
+								dispCost_container.insert(pair<float, int>(c0, d0));
+							else
 							{
-								int d1 = topDisp.ptr<float>(v, u, j)[0];
-								float c1 = topDisp.ptr<float>(v, u, j)[1];
-								if (abs(d0 - d1) < disp_DifThres)
+								for (int j = i + 1; j < n; j++)
 								{
-									dispCost_container.insert(pair<float, int>(c0, d0));
-									dispCost_container.insert(pair<float, int>(c1, d1));
-									step2++;
+									int d1 = topDisp.ptr<float>(v, u, j)[0];
+									float c1 = topDisp.ptr<float>(v, u, j)[1];
+									if (abs(d0 - d1) < disp_DifThres)
+									{
+										dispCost_container.insert(pair<float, int>(c0, d0));
+										dispCost_container.insert(pair<float, int>(c1, d1));
+									}
 								}
 							}
 						}
-						clock_t end1 = clock();
-						time_sum += (end1 - start1);
-						if (dispCost_container.empty())
+
+						if (dispCost_container.empty())  // Çé¿ö2
 						{
 							clock_t start3 = clock();
 							int difMostSmall1 = numeric_limits<int>::max();
 							int disp1 = -1;
 							int difMostSmall2 = numeric_limits<int>::max();
 							int disp2 = -1;
+							int difMostSmall3 = numeric_limits<int>::max();
+							int disp3 = -1;
+							int difMostSmall4 = numeric_limits<int>::max();
+							int disp4 = -1;
 							for (int i = 0; i < n; ++i)
 							{
 								int disp__ = topDisp.ptr<float>(v, u, i)[0];
@@ -1112,66 +1620,129 @@ void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 									difMostSmall2 = dif2;
 									disp2 = disp__;
 								}
+								int dif3 = abs(disp__ - disp_rt);
+								if (dif3 < difMostSmall3)
+								{
+									difMostSmall3 = dif3;
+									disp3 = disp__;
+								}
+								int dif4 = abs(disp__ - disp_lt);
+								if (dif4 < difMostSmall4)
+								{
+									difMostSmall4 = dif4;
+									disp4 = disp__;
+								}
 							}
-							int difMostSmall = min(difMostSmall1, difMostSmall2);
-							int disp = difMostSmall == difMostSmall1 ? disp1 : disp2;
+							int difMostSmall = min(min(difMostSmall3, difMostSmall4), min(difMostSmall1, difMostSmall2));
+							int disp = -1;
+							if (difMostSmall == difMostSmall4)
+								disp = disp4;
+							else if (difMostSmall == difMostSmall1)
+								disp = disp1;
+							else if (difMostSmall == difMostSmall2)
+								disp = disp2;
+							else if (difMostSmall == difMostSmall3)
+								disp = disp3;
+
+							//int disp = difMostSmall == difMostSmall1 ? disp1 : disp2;
 							if (difMostSmall < disp_DifThres3)
 								disP[u] = disp;
 							else
 								disP[u] = topDisp.ptr<float>(v, u, 0)[0];
-							clock_t end3 = clock();
-							time_sum3 += (end3 - start3);
 						}
 						else
-						{
-							mapsize += dispCost_container.size();
+						{  // Çé¿ö3
 							clock_t start4 = clock();
 							int difMostSmall = numeric_limits<int>::max();
 							int disp = -1;
 							bool has_find1 = false;
 							bool has_find2 = false;
+							bool has_find3 = false;
+							bool has_find4 = false;
 							for (iter_dispCost = dispCost_container.begin(); iter_dispCost != dispCost_container.end(); iter_dispCost++)
 							{
-								step++;
 								int disp = iter_dispCost->second;
 								float cost = iter_dispCost->first;
 								disp__num[disp]++;
 								disp__cost[disp] += cost;
-								if (abs(disp - disp_pre1) < disp_DifThres2)
-									has_find1 = true;
-								if (abs(disp - disp_pre2) < disp_DifThres2)
-									has_find2 = true;
+
+								//if (!use_neigh[0] && abs(disp - disp_pre1) < disp_DifThres2)
+								//{
+								//	has_find1 = true;
+								//	use_neigh[0] = true;
+								//}
+								//if (!use_neigh[1] && abs(disp - disp_pre2) < disp_DifThres2)
+								//{
+								//	has_find2 = true;
+								//	use_neigh[1] = true;
+								//}
+								//if (!use_neigh[2] && abs(disp - disp_r) < disp_DifThres2)
+								//{
+								//	has_find3 = true;
+								//	use_neigh[2] = true;
+								//}
+								//if (!use_neigh[3] && abs(disp - disp_d) < disp_DifThres2)
+								//{
+								//	has_find4 = true;
+								//	use_neigh[3] = true;
+								//}
+								//if (!use_neigh[4] && abs(disp - disp_lt) < disp_DifThres2)
+								//{
+								//	use_neigh[4] = true;
+								//}
+								//if (!use_neigh[5] && abs(disp - disp_rd) < disp_DifThres2)
+								//{
+								//	use_neigh[5] = true;
+								//}
+								//if (!use_neigh[6] && abs(disp - disp_rt) < disp_DifThres2)
+								//{
+								//	use_neigh[6] = true;
+								//}
+								//if (!use_neigh[7] && abs(disp - disp_ld) < disp_DifThres2)
+								//{
+								//	use_neigh[7] = true;
+								//}
 							}
-							clock_t end4 = clock();
-							time_sum4 += (end4 - start4);
 							int start = 2, end = 2;
 							if (has_find1)
 								start = 0;
 							if (has_find2)
 								end = 4;
-							if (has_find1 || has_find2)
+							//if (true)
+							if (true)
 							{
 								clock_t start2 = clock();
-								for (int i = start; i < end; i++)
+								uchar* tarP = I_c[0].ptr<uchar>(v, u);
+								bool isAddNei = true;
+								if (param_.vmTop_cir3_doColorLimit)
+									isAddNei = false;
+								for (int i = 0; i < neigh_len; i++)
 								{
-									int v_ = v + neigh_v[i];
-									int u_ = u + neigh_u[i];
-									if (v_ >= 0 && v_ < h_ && u_ >= 0 && u_ < w_)
+									if (use_neigh[i])
 									{
-										int num = topDisp.ptr<float>(v_, u_, num_candi - 1)[0];
-										for (int x = 0; x < num; x++)
+										int v_ = v + neigh_v[i];
+										int u_ = u + neigh_u[i];
+										if (v_ >= 0 && v_ < h_ && u_ >= 0 && u_ < w_)
 										{
-											int disp = topDisp.ptr<float>(v_, u_, x)[0];
-											float cost = topDisp.ptr<float>(v_, u_, x)[1];
-											if (disp__num.count(disp) == 1)
+											uchar* neiP = I_c[0].ptr<uchar>(v_, u_);
+							
+											if (isAddNei || judgeColorDif(tarP, neiP, 10, 3)) // Ôö¼ÓÑÕÉ«ÏÞÖÆ
 											{
-												disp__num[disp]++;
-												disp__cost[disp] += cost;
+												int num = topDisp.ptr<float>(v_, u_, num_candi - 1)[0];
+												for (int x = 0; x < num; x++)
+												{
+													int disp = topDisp.ptr<float>(v_, u_, x)[0];
+													float cost = topDisp.ptr<float>(v_, u_, x)[1];
+													if (disp__num.count(disp) == 1)
+													{
+														disp__num[disp]++;
+														disp__cost[disp] += cost;
+													}
+												}
 											}
 										}
 									}
 								}
-
 								int disp_A = -1;
 								int num_most = -1;
 								float cost_A = numeric_limits<float>::max();
@@ -1193,17 +1764,15 @@ void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 										disp_A = disp;
 									}
 								}
-								disP[u] = disp_A;
-								disp__cost.clear();
-								disp__num.clear();
-								clock_t end2 = clock();
-								time_sum2 += (end2 - start2);
+								disP[u] = disp_A;	
 							}
 							else
 							{
 								iter_dispCost = dispCost_container.begin();
 								disP[u] = iter_dispCost->second;
 							}
+							disp__cost.clear();
+							disp__num.clear();
 							dispCost_container.clear();
 						}
 					}
@@ -1211,13 +1780,6 @@ void StereoMatching::genDispFromTopCostVm2(Mat& topDisp, Mat& disp)
 			}
 		}
 		clock_t end = clock();
-		cout << "time_sum is: " << time_sum << endl;
-		cout << "time_sum2 is: " << time_sum2 << endl;
-		cout << "time_sum3 is: " << time_sum3 << endl;
-		cout << "time_sum4 is: " << time_sum4 << endl;
-		printf("step is: %I64u", step);
-		printf("step2 is: %I64u", step2);
-		printf("mapSize is : %I64u", mapsize);
 		cout << "genDispFromTopVm2 time is: " << end - start << endl;
 	}
 	
@@ -1375,15 +1937,36 @@ void StereoMatching::clearTimeTxt()
 	}
 }
 
+void StereoMatching::openCSV()
+{
+	ofs_.open(root + param_.errCsvName, ios::out | ios::app);
+}
+
+void StereoMatching::closeCSV()
+{
+	ofs_.close();
+}
+
 void StereoMatching::pipeline()
 {
 	const auto t1 = std::chrono::system_clock::now();
+	ofs_.open(root + param_.errCsvName, ios::out | ios::app);
 
-	clearErrTxt();  // Çå¿ÕÎó²îtxt
-	clearTimeTxt();  // Çå¿ÕÊ±¼ätxt
+	//clearErrTxt();  // Çå¿ÕÎó²îtxts
+	//clearTimeTxt();  // Çå¿ÕÊ±¼ätxt
 	
 	costCalculate(); // ´ú¼Û¼ÆËã£¨º¬´ú¼Û¾ÛºÏ£©
 
+	//if (object == "")
+		//showArms(248, 325);
+		//showArms(347, 302);
+		//showArms(310, 378); Plastic
+		showArms(37, 166); //Teddy
+		//showArms(22, 313);
+		//showArms(78, 299);
+		//showArms(257, 136);
+		//showArms(257, 121); // y
+		//showArms(257, 105);  // z Laundry
 	if (Do_dispOptimize)
 		dispOptimize(); // ÊÓ²îÓÅ»¯
 
@@ -1394,29 +1977,21 @@ void StereoMatching::pipeline()
 	const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
 	std::cout << "disparity computation time: " << duration << "[msec]" << std::endl;
 	saveTime(duration, "ALL");
+	ofs_.close();
 }
 
 void StereoMatching::costScan(cv::Mat& Lr, cv::Mat& vm, int rv, int ru, bool leftFirst)
 {
-	CV_Assert(Lr.size == vm.size);
-
-	int W_V = 0;
-	int W_U = 0;
-
-	if (!LRM)
-	{
-		W_U = param_.W_U;
-		W_V = param_.W_V;
-	}
+	//CV_Assert(Lr.size == vm.size);
 
 	int h = vm.size[0];
 	int w = vm.size[1];
 	int n = param_.numDisparities;
 
-	int v0 = 0, v1 = h, u0 = W_U, u1 = w - W_U, dv = +1, du = +1;
+	int v0 = 0, v1 = h, u0 = 0, u1 = w, dv = +1, du = +1;
 	if ((rv > 0) || (rv == 0 && ru > 0))
 	{
-		v0 = h - 1; v1 = -1; u0 = w - W_U - 1; u1 = -1; dv = -1; du = -1;
+		v0 = h - 1; v1 = -1; u0 = w - 1; u1 = -1; dv = -1; du = -1;
 	}
 
 	bool preIsInner = true;
@@ -1425,11 +2000,11 @@ void StereoMatching::costScan(cv::Mat& Lr, cv::Mat& vm, int rv, int ru, bool lef
 		for (int u = u0; u != u1; u += du)
 		{
 			preIsInner = true;
-			if (v + rv > h - 1 || v + rv < 0 || u + ru > w - W_U - 1 || u + ru < W_U)
+			if (v + rv > h - 1 || v + rv < 0 || u + ru > w - 1 || u + ru < 0)
 				preIsInner = false;
 			try
 			{
-				switch (vm.type())
+				switch (vm.depth())
 				{
 				case CV_8U:  // census
 					updateCost<uchar>(Lr, vm, v, u, n, rv, ru, preIsInner, leftFirst);
@@ -1473,7 +2048,8 @@ void StereoMatching::gen_sgm_vm(Mat& vm, vector<cv::Mat1f>& Lr, int numOfDirec)
 				{
 					sum += Lr[num].ptr<float>(v, u)[d];
 				}
-				vmP[d] = sum / numOfDirec;
+				//vmP[d] = sum / numOfDirec;
+				vmP[d] = sum;
 			}
 		}
 	}
@@ -1483,12 +2059,13 @@ StereoMatching::StereoMatching(cv::Mat& I1_c, cv::Mat& I2_c, cv::Mat& I1_g, cv::
 {
 	this->h_ = I1_c.rows;
 	this->w_ = I1_c.cols;
+	this->d_ = param_.numDisparities;
 	this->I_c.resize(2);
 	this->I_g.resize(2);
 	this->I_mask.resize(3);
 	this->I_c[0] = I1_c;
-	cv::cvtColor(I1_c, this->Lab, COLOR_BGR2Lab);
-	cv::cvtColor(I1_c, this->HSV, COLOR_BGR2HSV);
+	/*cv::cvtColor(I1_c, this->Lab, COLOR_BGR2Lab);
+	cv::cvtColor(I1_c, this->HSV, COLOR_BGR2HSV);*/
 	this->I_c[1] = I2_c;
 	this->I_g[0] = I1_g;
 	this->I_g[1] = I2_g;
@@ -1510,8 +2087,6 @@ StereoMatching::StereoMatching(cv::Mat& I1_c, cv::Mat& I2_c, cv::Mat& I1_g, cv::
 	idx = aggregation.find("CBCA");
 	if (idx != string::npos)
 	{
-		initArm();
-		calArms();
 		param_.sgm_P1 = 1.0;
 		param_.sgm_P2 = 3.0;
 	}
@@ -1520,7 +2095,8 @@ StereoMatching::StereoMatching(cv::Mat& I1_c, cv::Mat& I2_c, cv::Mat& I1_g, cv::
 	if (idx != string::npos)
 		param_.sgm_P1 = 0.5, param_.sgm_P2 = 1.0;
 
-	if (aggregation == "guideFilter")
+	idx = aggregation.find("GF");
+	if (idx != string::npos)
 	{
 		guideVm.resize(2);
 		for (int i = 0; i < 2; i++)
@@ -1529,6 +2105,7 @@ StereoMatching::StereoMatching(cv::Mat& I1_c, cv::Mat& I2_c, cv::Mat& I1_g, cv::
 			for (int d = 0; d < param_.numDisparities; d++)
 				guideVm[i][d].create(h_, w_, CV_32F);
 		}
+		param_.sgm_P1 = 1.0, param_.sgm_P2 = 3.0;
 	}
 }
 
@@ -1545,6 +2122,89 @@ static inline int wta(const uchar* vPos, int n)
 		}
 	}
 	return disp;
+}
+
+template<class T>
+void PrintMat(const Mat& mat)
+{
+	int rows = mat.rows;
+	int cols = mat.cols;
+	printf("\n%d x %d Matrix\n", rows, cols);
+	for (int r = 0; r < rows; r++) {
+		for (int c = 0; c < cols; c++) {
+			cout << mat.at<T>(r, c) << "\t";
+		}
+		printf("\n");
+	}
+	printf("\n");
+}
+
+void SolveAll(StereoMatching**& smPyr, const int PY_LVL, const float REG_LAMBDA)
+{
+	printf("\n\t\tSolve All");
+	printf("\n\t\tReg param: %.4lf\n", REG_LAMBDA);
+	// construct regularization matrix
+	Mat regMat = Mat::zeros(PY_LVL, PY_LVL, CV_32FC1);
+	for (int s = 0; s < PY_LVL; s++) {
+		if (s == 0) {
+			regMat.at<float>(s, s) = 1 + REG_LAMBDA;
+			if (PY_LVL > 1)
+				regMat.at<float>(s, s + 1) = -REG_LAMBDA;
+		}
+		else if (s == PY_LVL - 1) {
+			regMat.at<float>(s, s) = 1 + REG_LAMBDA;
+			regMat.at<float>(s, s - 1) = -REG_LAMBDA;
+		}
+		else {
+			regMat.at<float>(s, s) = 1 + 2 * REG_LAMBDA;
+			regMat.at<float>(s, s - 1) = -REG_LAMBDA;
+			regMat.at<float>(s, s + 1) = -REG_LAMBDA;
+		}
+	}
+	Mat regInv = regMat.inv();
+	float* invWgt = new float[PY_LVL];
+	for (int s = 0; s < PY_LVL; s++) {
+		invWgt[s] = regInv.at<float>(0, s);
+	}
+	PrintMat<float>(regInv);
+	int hei = smPyr[0]->h_;
+	int wid = smPyr[0]->w_;
+	int disp = smPyr[0]->d_;
+
+
+	//
+	// Left Cost Volume
+	//
+	int img_n = StereoMatching::Do_refine ? 2 : 1;
+	for (int n = 0; n < img_n; n++)
+	{
+		for (int y = 0; y < hei; y++) {
+			for (int x = 0; x < wid; x++) {
+				for (int d = 0; d < disp; d++) // Ô­´úÂëdÊÇ´Ó1¿ªÊ¼µÄ
+				{
+					int curY = y;
+					int curX = x;
+					int curD = d;
+					float sum = 0;
+					for (int s = 0; s < PY_LVL; s++) {
+						float curCost = smPyr[s]->vm[n].ptr<float>(curY, curX)[curD];
+#ifdef _DEBUG
+						if (y == 160 && x == 160) {
+							printf("\ns=%d(%d,%d)\td=%d\tcost=%.4lf", s, curY, curX, curD, curCost);
+				}
+#endif
+						sum += invWgt[s] * curCost;
+						curY = curY / 2;
+						curX = curX / 2;
+						curD = (curD + 1) / 2;
+			}
+					smPyr[0]->vm[n].ptr<float>(y, x)[d] = sum;
+		}
+	}
+		}
+
+	}
+	delete[] invWgt;
 }
 
 int StereoMatching::HammingDistance(uint64_t c1, uint64_t c2) { return static_cast<int>(popcnt64(c1 ^ c2)); }
@@ -1599,14 +2259,13 @@ void StereoMatching::fillSurronding(cv::Mat& D1, cv::Mat& D2)
 		}
 }
 
-void StereoMatching::LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2)
+void StereoMatching::LRConsistencyCheck_normal(cv::Mat& D1, cv::Mat& D2, Mat& errMask, int LOR)
 {
 	const int n = param_.numDisparities;
-	int dis_occ = 0;
-	int dis_mis = 0;
-	int dis_err = 0;
 
 	//OMP_PARALLEL_FOR
+	if (LOR == 0)
+	{
 		for (int v = 0; v < h_; v++)
 		{
 			short* _D1 = D1.ptr<short>(v);
@@ -1616,7 +2275,38 @@ void StereoMatching::LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2)
 			{
 				const short d = _D1[u];
 				if (d < 0 || u - d < 0 || abs(d - _D2[u - d]) > param_.LRmaxDiff)
+					_D1[u] = -1;
+			}
+		}
+	}
+}
+
+void StereoMatching::LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2, Mat& errMask, int LOR)
+{
+	const int n = param_.numDisparities;
+	int dis_occ = 0;
+	int dis_mis = 0;
+	int dis_err = 0;
+
+	errMask.create(h_, w_, CV_8U);
+	Mat errMask1 = Mat::zeros(h_, w_, CV_8U);
+	errMask = 0;
+
+	//OMP_PARALLEL_FOR
+	if (LOR == 0)
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			short* _D1 = D1.ptr<short>(v);
+			short* _D2 = D2.ptr<short>(v);
+			float* DTP = DT.ptr<float>(v);
+			uchar* errP = errMask.ptr<uchar>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				const short d = _D1[u];
+				if (d < 0 || u - d < 0 || abs(d - _D2[u - d]) > param_.LRmaxDiff)
 				{
+					errP[u] = 255;
 					if (DTP[u] != 0)
 						dis_err++;
 					int disp = param_.DISP_OCC;
@@ -1634,11 +2324,61 @@ void StereoMatching::LRConsistencyCheck(cv::Mat& D1, cv::Mat& D2)
 				}
 			}
 		}
+		cout << "first num" << endl;
+		cout << "dis_err: " << dis_err << endl;
+		cout << "dis_occ: " << dis_err - dis_mis << endl;
+		cout << "dis_mis: " << dis_mis << endl;
+#ifdef DEBUG
+		imwrite(param_.savePath + "LR0.png", errMask);
+#endif // DEBUG
 
-	cout << "first num" << endl;
-	cout << "dis_err: " << dis_err << endl;
-	cout << "dis_occ: " << dis_err - dis_mis << endl;
-	cout << "dis_mis: " << dis_mis << endl;
+	}
+	else if (LOR == 1)
+	{
+		for (int v = 0; v < h_; v++)
+		{
+			short* _D1 = D1.ptr<short>(v);
+			short* _D2 = D2.ptr<short>(v);
+			uchar* errP = errMask1.ptr<uchar>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				const short d = _D2[u];
+				if (d < 0 || u + d >= w_ || abs(d - _D1[u + d]) > param_.LRmaxDiff)
+				{
+					int disp = param_.DISP_OCC;
+					for (int d = 0; d < n && u + d <= w_ - 1; d++)
+					{
+						if (_D1[u + d] == d)
+						{
+							disp = param_.DISP_MIS;
+							break;
+						}
+					}
+					_D2[u] = disp;
+					errP[u] = 255;
+				}
+			}
+		}
+		imwrite(param_.savePath + "LR1.png", errMask1);
+	}
+}
+
+
+void StereoMatching::LRConsistencyCheck_new(Mat& errorMask)
+{
+	const int Thres = 0;
+	for (int v = 0; v < h_; v++)
+	{
+		uchar* eP = errorMask.ptr<uchar>(v);
+		short* d1 = DP[0].ptr<short>(v);
+		short* d2 = DP[1].ptr<short>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			int d1V = d1[u];
+			if (d1V < 0 || u - d1V < 0 || abs(d1V - d2[u - d1V]) > Thres)
+				eP[u] = 0;
+		}
+	}
 }
 
 void StereoMatching::cal_ave_std_ncc(cv::Mat& I, cv::Mat& E_std)
@@ -1733,11 +2473,8 @@ void StereoMatching::gen_ad_sd_vm(Mat& vm_asd, int LOR, int AOS, float trunc)
 	Mat I1 = channels == 3 ? I_c[1] : I_g[1];
 
 	const int n = param_.numDisparities;
-	//const float DEFAULT = AOS == 0 ? 255 : 65535;
-	//trunc = trunc != 1000000 ? trunc : DEFAULT;
 	const int pow_index = AOS == 0 ? 1 : 2;
 	int leftCoefficient = 0, rightCoefficient = -1;
-	//float thre = AOS == 0 ? 20 : 400;
 	if (LOR == 1)
 	{
 		leftCoefficient = 1;
@@ -1809,6 +2546,45 @@ void StereoMatching::gen_truncAD_vm(Mat& vm_asd, int LOR)
 		}
 	}
 }
+
+void StereoMatching::gen_ad_vm(Mat& vm, Mat& I_l, Mat& I_r, float Trunc, int LOR)
+{
+	float DEFAULT = param_.is_adNorm ? Trunc / 255 : Trunc;
+
+	const int n = param_.numDisparities;
+	int leftCoefficient = 0, rightCoefficient = -1;
+	if (LOR == 1)
+	{
+		leftCoefficient = 1;
+		rightCoefficient = 0;
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			float* vPtr = vm.ptr<float>(v, u);
+			for (int d = 0; d < n; d++)
+			{
+				int uL = u + d * leftCoefficient;
+				int uR = u + d * rightCoefficient;
+				if (uL >= w_ || uR < 0)
+					vPtr[d] = DEFAULT;
+				else
+				{
+					uchar* lP = I_l.ptr<uchar>(v, uL);
+					uchar* rP = I_r.ptr<uchar>(v, uR);
+					float sum = 0;
+					for (int cha = 0; cha < I_l.channels(); cha++)
+						sum += pow(lP[cha] - rP[cha], 2);
+					vPtr[d] = min(sqrt(sum), DEFAULT);
+					if (param_.is_adNorm)
+						vPtr[d] /= DEFAULT;
+				}
+			}
+		}
+	}
+}
+
 
 void StereoMatching::gen_ssd_vm(cv::Mat& sd_vm, cv::Mat& ssd_vm)
 {
@@ -2015,7 +2791,7 @@ void StereoMatching::wta_Co(cv::Mat& vm, cv::Mat& D1, cv::Mat& D2)
 
 }
 
-void StereoMatching::genTrueHorVerArms()
+void StereoMatching::genTrueHorVerArms(vector<Mat>& HVL, vector<Mat>& HVL_INTERSECTION)
 {
 	const int n = param_.numDisparities;
 	if (param_.cbca_armHV)
@@ -2068,7 +2844,8 @@ void StereoMatching::genTrueHorVerArms()
 	cout << "finish combine arms" << endl;
 }
 
-static bool judgeColorDif(uchar* target, uchar* refer, int thres, int channel)
+template <typename T>
+static bool judgeColorDif(T* target, T* refer, int thres, int channel)
 {
 	for (int c = 0; c < channel; c++)
 	{
@@ -2078,7 +2855,404 @@ static bool judgeColorDif(uchar* target, uchar* refer, int thres, int channel)
 	return true;
 }
 //  L, L_out, C_D, C_D_out, minL
-void StereoMatching::calHorVerDis(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL)
+
+template <typename T>
+void StereoMatching::calHorVerDis(Mat& I, Mat& cross, int L, int DIF, int minL)
+{
+	int channels = I.channels();
+	clock_t start = clock();
+	cout << "start cal CrossArm" << endl;
+	Mat I_enhance;
+	//edgeEnhance(I, I_enhance);
+	//I = I_enhance;
+	if (param_.doGF_bef_calArm)
+		ximgproc::guidedFilter(I, I, I, 9, 50);
+	//xxxxx
+	//medianBlur(I, I, 3);
+	const int h = I.rows;
+	const int w = I.cols;
+
+	int du_[] = { -1, 0 }, dv_[] = { 0, -1 }, du, dv;
+	for (int direc = 0; direc < 4; direc++)
+	{
+		switch (direc)
+		{
+		case 0:
+			du = du_[0], dv = dv_[0];
+			break;
+		case 1:
+			du = -du;
+			dv = -dv;
+			break;
+		case 2:
+			du = du_[1];
+			dv = dv_[1];
+			break;
+		case 3:
+			du = -du;
+			dv = -dv;
+			break;
+		}
+
+		for (int v = 0; v < h; v++)
+		{
+			for (int u = 0; u < w; u++)
+			{
+				T* IPtr = I.ptr<T>(v, u);
+				ushort* cPtr = cross.ptr<ushort>(v, u);
+				ushort arm = 1;
+				for (; arm <= L; arm++)
+				{
+					int v_arm = v + arm * dv, u_arm = u + arm * du;
+					if (v_arm < 0 || v_arm >= h || u_arm < 0 || u_arm >= w)
+						break;
+					T* armPtr = I.ptr<T>(v_arm, u_arm);
+					if (armPtr[0] < 0)
+						break;
+					T* armPrePtr = I.ptr<T>(v + (arm - 1) * dv, u + (arm - 1) * du);
+					float DIF_ = DIF - (arm / L) * DIF;
+					//bool neighborDifInThres = judgeColorDif<T>(armPtr, armPrePtr, DIF, channels);
+					bool initPresDifInThres = judgeColorDif<T>(IPtr, armPtr, DIF, channels);
+					//if (!neighborDifInThres || !initPresDifInThres)
+					if (!initPresDifInThres)
+						break;
+				}
+				if (--arm >= minL)
+					cPtr[direc] = arm;  // lÒÑ¾­±»¼õ¹ý1ÁË
+				else
+				{
+					for (int len = minL; len >= 0; len--)  // ¶¯Ì¬ÇóÈ¡±ß¿òÇøÏñËØµãµÄÍâ²¿±Û³¤£¬Ê¹ÆäÄÜÈ¡µ½min(minL£¬dis2border)
+					{
+						if (u + len * du >= 0 && u + len * du <= w - 1 && v + len * dv >= 0 && v + len * dv <= h - 1)
+						{
+							cPtr[direc] = len;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			ushort* crossP = cross.ptr<ushort>(v, u);
+			int armSum = 0;
+			for (int num = 0; num < 4; num++)
+			{
+				armSum += crossP[num];
+			}
+			crossP[4] = (ushort)armSum;
+		}
+	}
+
+
+	clock_t end = clock();
+	clock_t time = end - start;
+	cout << "finish cal CrossArm" << endl;
+#ifdef DEBUG
+	saveTime(time, "genArmForImg_L");
+#endif // DEBUG
+}
+template <typename T>
+void StereoMatching::calHorVerDis(Mat& I, Mat& cross, int L, int L_out, int C_D, int C_D_out, int minL)
+{
+	clock_t start = clock();
+	cout << "start cal CrossArm" << endl;
+	Mat I_enhance;
+	//edgeEnhance(I, I_enhance);
+	//I = I_enhance;
+	if (param_.doGF_bef_calArm)
+		ximgproc::guidedFilter(I, I, I, 9, 50);
+	//xxxxx
+	//medianBlur(I, I, 3);
+	const int h = I.rows;
+	const int w = I.cols;
+	const int channel = I.channels();
+
+	int du_[] = { -1, 0 }, dv_[] = {0, -1}, du, dv;
+	for (int direc = 0; direc < 4; direc++)
+	{
+		switch (direc)
+		{
+		case 0:
+			du = du_[0], dv = dv_[0];
+			break;
+		case 1:
+			du = -du;
+			dv = -dv;
+			break;
+		case 2:
+			du = du_[1];
+			dv = dv_[1];
+			break;
+		case 3:
+			du = -du;
+			dv = -dv;
+			break;
+		}
+
+		for (int v = 0; v < h; v++)
+		{
+			for (int u = 0; u < w; u++)
+			{
+				T* IPtr = I.ptr<T>(v, u);
+				ushort* cPtr = cross.ptr<ushort>(v, u);
+				ushort arm = 1;
+				for (; arm <= L_out; arm++)
+				{
+					int v_arm = v + arm * dv, u_arm = u + arm * du;
+					if (v_arm < 0 || v_arm >= h || u_arm < 0 || u_arm >= w)
+						break;
+					T* armPtr = I.ptr<T>(v_arm, u_arm);
+					T* armPrePtr = I.ptr<T>(v + (arm - 1) * dv, u + (arm - 1) * du);
+					bool neighborDifInThres = judgeColorDif<T>(armPtr, armPrePtr, C_D, channel);
+					bool initPresDifInThres = arm <= L ? judgeColorDif<T>(IPtr, armPtr, C_D, channel) : judgeColorDif<T>(IPtr, armPtr, C_D_out, channel);
+					if (!neighborDifInThres || !initPresDifInThres)
+						break;
+				}
+				if (--arm >= minL)
+					cPtr[direc] = arm;  // lÒÑ¾­±»¼õ¹ý1ÁË
+				else
+				{
+					for (int len = minL; len >= 0; len--)  // ¶¯Ì¬ÇóÈ¡±ß¿òÇøÏñËØµãµÄÍâ²¿±Û³¤£¬Ê¹ÆäÄÜÈ¡µ½min(minL£¬dis2border)
+					{
+						if (u + len * du >= 0 && u + len * du <= w - 1 && v + len * dv >= 0 && v + len * dv <= h - 1)
+						{
+							cPtr[direc] = len;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			ushort* crossP = cross.ptr<ushort>(v, u);
+			int armSum = 0;
+			for (int num = 0; num < 4; num++)
+			{
+				armSum += crossP[num];
+			}
+			crossP[4] = (ushort)armSum;
+		}
+	}
+
+	clock_t end = clock();
+	clock_t time = end - start;
+#ifdef DEBUG
+	saveTime(time, "genArmForImg_L");
+#endif // DEBUG
+}
+
+template <typename T>
+void StereoMatching::calHorVerDis(Mat& I, Mat& cross, int L0, int L1, int L2, int thresh0, int thresh1, int thresh2, int minL)
+{
+	clock_t start = clock();
+	cout << "start cal CrossArm" << endl;
+	Mat I_enhance;
+	//edgeEnhance(I, I_enhance);
+	//I = I_enhance;
+	if (param_.doGF_bef_calArm)
+		ximgproc::guidedFilter(I, I, I, 9, 50);
+	//xxxxx
+	//medianBlur(I, I, 3);
+	const int h = I.rows;
+	const int w = I.cols;
+	const int channel = I.channels();
+
+	int du_[] = { -1, 0 }, dv_[] = { 0, -1 }, du, dv;
+	for (int direc = 0; direc < 4; direc++)
+	{
+		switch (direc)
+		{
+		case 0:
+			du = du_[0], dv = dv_[0];
+			break;
+		case 1:
+			du = -du;
+			dv = -dv;
+			break;
+		case 2:
+			du = du_[1];
+			dv = dv_[1];
+			break;
+		case 3:
+			du = -du;
+			dv = -dv;
+			break;
+		}
+
+		for (int v = 0; v < h; v++)
+		{
+			for (int u = 0; u < w; u++)
+			{
+				T* IPtr = I.ptr<T>(v, u);
+				ushort* cPtr = cross.ptr<ushort>(v, u);
+				ushort arm = 1;
+				for (; arm <= L2; arm++)
+				{
+					int v_arm = v + arm * dv, u_arm = u + arm * du;
+					if (v_arm < 0 || v_arm >= h || u_arm < 0 || u_arm >= w)
+						break;
+					T* armPtr = I.ptr<T>(v_arm, u_arm);
+					T* armPrePtr = I.ptr<T>(v + (arm - 1) * dv, u + (arm - 1) * du);
+					bool neighborDifInThres = judgeColorDif<T>(armPtr, armPrePtr, thresh0, channel);
+					bool initPresDifInThres = true;
+					if (arm <= L0)
+						initPresDifInThres = judgeColorDif<T>(IPtr, armPtr, thresh0, channel);
+					else if (arm <= L1)
+						initPresDifInThres = judgeColorDif<T>(IPtr, armPtr, thresh1, channel);
+					else 
+						initPresDifInThres = judgeColorDif<T>(IPtr, armPtr, thresh2, channel);
+					if (!neighborDifInThres || !initPresDifInThres)
+						break;
+				}
+				if (--arm >= minL)
+					cPtr[direc] = arm;  // lÒÑ¾­±»¼õ¹ý1ÁË
+				else
+				{
+					for (int len = minL; len >= 0; len--)  // ¶¯Ì¬ÇóÈ¡±ß¿òÇøÏñËØµãµÄÍâ²¿±Û³¤£¬Ê¹ÆäÄÜÈ¡µ½min(minL£¬dis2border)
+					{
+						if (u + len * du >= 0 && u + len * du <= w - 1 && v + len * dv >= 0 && v + len * dv <= h - 1)
+						{
+							cPtr[direc] = len;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			ushort* crossP = cross.ptr<ushort>(v, u);
+			int armSum = 0;
+			for (int num = 0; num < 4; num++)
+			{
+				armSum += crossP[num];
+			}
+			crossP[4] = (ushort)armSum;
+		}
+	}
+
+	clock_t end = clock();
+	clock_t time = end - start;
+
+	saveTime(time, "genArmForImg_L");
+}
+
+template <typename T>
+void StereoMatching::calHorVerDis(Mat& I, Mat& cross, vector<int> L, vector<int> thresh, int minL)
+{
+	clock_t start = clock();
+	cout << "start cal CrossArm" << endl;
+	Mat I_enhance;
+	//edgeEnhance(I, I_enhance);
+	//I = I_enhance;
+	if (param_.doGF_bef_calArm)
+		ximgproc::guidedFilter(I, I, I, 9, 50);
+	//xxxxx
+	//medianBlur(I, I, 3);
+	const int h = I.rows;
+	const int w = I.cols;
+	const int channel = I.channels();
+
+	int du_[] = { -1, 0 }, dv_[] = { 0, -1 }, du, dv;
+	for (int direc = 0; direc < 4; direc++)
+	{
+		switch (direc)
+		{
+		case 0:
+			du = du_[0], dv = dv_[0];
+			break;
+		case 1:
+			du = -du;
+			dv = -dv;
+			break;
+		case 2:
+			du = du_[1];
+			dv = dv_[1];
+			break;
+		case 3:
+			du = -du;
+			dv = -dv;
+			break;
+		}
+
+		int len = L.size();
+
+		for (int v = 0; v < h; v++)
+		{
+			for (int u = 0; u < w; u++)
+			{
+				T* IPtr = I.ptr<T>(v, u);
+				ushort* cPtr = cross.ptr<ushort>(v, u);
+				ushort arm = 1;
+				for (; arm <= L[len - 1]; arm++)
+				{
+					int v_arm = v + arm * dv, u_arm = u + arm * du;
+					if (v_arm < 0 || v_arm >= h || u_arm < 0 || u_arm >= w)
+						break;
+					T* armPtr = I.ptr<T>(v_arm, u_arm);
+					T* armPrePtr = I.ptr<T>(v + (arm - 1) * dv, u + (arm - 1) * du);
+					bool neighborDifInThres = judgeColorDif<T>(armPtr, armPrePtr, 20, channel);
+					bool initPresDifInThres = true;
+					for (int n_L = 0; n_L < len; n_L++)
+					{
+						if (arm <= L[n_L])
+						{
+							initPresDifInThres = judgeColorDif<T>(IPtr, armPtr, thresh[n_L], channel);
+							break;
+						}
+					}
+
+					if (!neighborDifInThres || !initPresDifInThres)
+						break;
+				}
+				if (--arm >= minL)
+					cPtr[direc] = arm;  // lÒÑ¾­±»¼õ¹ý1ÁË
+				else
+				{
+					for (int len = minL; len >= 0; len--)  // ¶¯Ì¬ÇóÈ¡±ß¿òÇøÏñËØµãµÄÍâ²¿±Û³¤£¬Ê¹ÆäÄÜÈ¡µ½min(minL£¬dis2border)
+					{
+						if (u + len * du >= 0 && u + len * du <= w - 1 && v + len * dv >= 0 && v + len * dv <= h - 1)
+						{
+							cPtr[direc] = len;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			ushort* crossP = cross.ptr<ushort>(v, u);
+			int armSum = 0;
+			for (int num = 0; num < 4; num++)
+			{
+				armSum += crossP[num];
+			}
+			crossP[4] = (ushort)armSum;
+		}
+	}
+
+	clock_t end = clock();
+	clock_t time = end - start;
+
+	saveTime(time, "genArmForImg_L");
+}
+
+void StereoMatching::calHorVerDis2(int imgNum, int channel, uchar L, uchar L_out, uchar C_D, uchar C_D_out, uchar minL)
 {
 	clock_t start = clock();
 	cout << "start cal CrossArm" << endl;
@@ -2127,9 +3301,11 @@ void StereoMatching::calHorVerDis(int imgNum, int channel, uchar L, uchar L_out,
 						break;
 					uchar* armPtr = I.ptr<uchar>(v_arm, u_arm);
 					uchar* armPrePtr = I.ptr<uchar>(v + (arm - 1) * dv, u + (arm - 1) * du);
+					int c_d = C_D - ((float)C_D / L * arm) + 10;
+					//c_d = max(c_d, 10);
 					bool neighborDifInThres = judgeColorDif(armPtr, armPrePtr, C_D, channel);
-					bool initPresDifInThres = arm <= L ? judgeColorDif(IPtr, armPtr, C_D, channel) : judgeColorDif(IPtr, armPtr, C_D_out, channel);
-					if (!neighborDifInThres || !initPresDifInThres)
+					bool initPresDifInThres = arm <= L ? judgeColorDif(IPtr, armPtr, c_d, channel) : judgeColorDif(IPtr, armPtr, C_D_out, channel);
+					if (!initPresDifInThres || !neighborDifInThres)
 						break;
 				}
 				if (--arm >= minL)
@@ -2293,7 +3469,7 @@ void StereoMatching::drawArmForPoint(Mat& HVL, int* v, int* u, int num)
 	}
 	string path = param_.savePath; // ******
 	system(("IF NOT EXIST " + path + " (mkdir " + path + ")").c_str());
-	path += "arm.png";
+	path += "armTeddy.png";
 	imwrite(path, I_out);
 }
 
@@ -2400,14 +3576,6 @@ void StereoMatching::gen_vm_from2vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 	{
 		for (int u = 0; u < w_; u++)
 		{
-			short* arm = HVL[LOR].ptr<short>(v, u);
-			int st = 100000;
-			for (int dir = 0; dir < 4; dir++)
-			{
-				if (st > arm[dir])
-					st = arm[dir];
-			}
-			float a = 1 - exp(-0.5 / st);
 			float* vm0Ptr = vm0.ptr<float>(v, u);
 			float* vm1Ptr = vm1.ptr<float>(v, u);
 			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
@@ -2460,7 +3628,6 @@ void StereoMatching::gen_vm_from3vm_exp(cv::Mat& combinedVm, cv::Mat& vm0, cv::M
 			float* combinedVmPtr = combinedVm.ptr<float>(v, u);
 			for (int d = 0; d < n; d++)
 			{
-				// wxy
 				//float adGradv = 0.7 * vm0Ptr[d] + 0.3 * vm2Ptr[d];
 				//combinedVmPtr[d] = a * (1 - exp(-adGradv / 2)) + (1 - a) * (1 - exp(-vm1Ptr[d] / 10));
 				//combinedVmPtr[d] = 2 - exp(-adGradv / 2) - exp(-vm1Ptr[d] / 10);
@@ -2801,7 +3968,7 @@ void StereoMatching::gen_dispFromVm(Mat& vm, Mat& dispMap)
 
 void StereoMatching::genfinalVm_cbca(Mat& vm, Mat& area, Mat& areaIS, int imgNum)
 {
-	CV_Assert(vm.type() == CV_32F);
+	CV_Assert(vm.depth() == CV_32F);
 	const int n = param_.numDisparities;
 
 	int s = 0;
@@ -2917,19 +4084,420 @@ void StereoMatching::combine_HV_Tilt(Mat& vm_HV, Mat& vm_Tile, Mat& area_HV, Mat
 	}
 }
 
-void StereoMatching::CBCA()
+void StereoMatching::calPKR(Mat& vm, Mat& mask)
 {
-	cbca_aggregate();
+	Mat vmC = vm.clone();
+	mask.create(h_, w_, CV_8U);
+	mask = 0;
+	vector<float> cost(2);
+	float ratio_PKR = 0.1;
+	int num_sum = 0;
+	int num = 0;
+	for (int v = 0; v < mask.rows; v++)
+	{
+		uchar* mP = mask.ptr<uchar>(v);
+		for (int u = 0; u < mask.cols; u++)
+		{
+			num_sum++;
+			float* vmP = vmC.ptr<float>(v, u);
+			for (int n = 0; n < 2; n++)
+			{
+				float min = numeric_limits<float>::max();
+				int disp = -1;
+				for (int d = 0; d < d_; d++)
+				{
+					if (vmP[d] < min)
+					{
+						min = vmP[d];
+						disp = d;
+					}
+				}
+				cost[n] = min;
+				vmP[disp] = numeric_limits<float>::max();
+			}
+			if ((cost[1] - cost[0]) / cost[1] < ratio_PKR)
+			{
+				mP[u] = 1;
+				num++;
+			}
+		}
+	}
+	cout << "pkr±ÈÀý£º" << ((float)num / (float)num_sum) << endl;
 }
 
-void StereoMatching::guideFilter()
+void StereoMatching::signDp_UsingPKR(Mat& disp, Mat& PKR_Err_Mask)
+{
+	for (int v = 0; v < h_; v++)
+	{
+		uchar* mP = PKR_Err_Mask.ptr<uchar>(v);
+		short* dP = disp.ptr<short>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			if (mP[u] > 0 && dP[u] >= 0)
+				dP[u] = param_.DISP_PKR;
+		}
+	}
+}
+
+void StereoMatching::combine2Vm(vector<Mat>& vm, vector<Mat>& vm2)
+{
+	int imgNum = Do_refine ? 2 : 1;
+	//Mat mask(h_, w_, CV_8U, Scalar::all(0));
+	Mat mask;
+	for (int n = 0; n < imgNum; n++)
+	{
+		calPKR(vm[n], mask);
+		int step = 0;
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* pkrP = mask.ptr<uchar>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				if (pkrP[u] == 1)
+				{
+					step++;
+					float* vmP = vm[n].ptr<float>(v, u);
+					float* vmP2 = vm2[n].ptr<float>(v, u);
+					for (int d = 0; d < d_; d++)
+						vmP[d] = vmP[d] * 0.3 + vmP2[d] * 0.7;
+				}
+			}
+		}
+		cout << "step: " << step << endl;
+	}
+}
+
+void StereoMatching::combine2Vm_2(vector<Mat>& vm, vector<Mat>& vm2, vector<Mat>& HVL)
+{
+	int imgNum = Do_refine ? 2 : 1;
+	int armLimit = 10;
+	//Mat mask(h_, w_, CV_8U, Scalar::all(0));
+	int step = 0;
+	for (int n = 0; n < imgNum; n++)
+	{
+		if (n == 0)
+		{
+			arm_Mask.create(h_, w_, CV_8U);
+			arm_Mask = 0;
+		}
+
+		Mat HVL_ = HVL[n];
+		int step = 0;
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* armMP = arm_Mask.ptr<uchar>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				ushort* arm = HVL_.ptr<ushort>(v, u);
+
+				bool armInRange = true;
+				for (int dir = 0; dir < 4; dir++)
+				{
+					if (arm[dir] > armLimit)
+					{
+						armInRange = false;
+						break;
+					}
+				}
+				if (armInRange) // ×î³¤±Û³¤µÍÓÚãÐÖµ
+				{
+					armMP[u] = 1;
+					step++;
+					float* vmP = vm[n].ptr<float>(v, u);
+					float* vmP2 = vm2[n].ptr<float>(v, u);
+					for (int d = 0; d < d_; d++)
+						vmP[d] = vmP[d] * 0.3 + vmP2[d] * 0.7;
+				}
+			}
+		}
+		cout << "step: " << step << endl;
+	}
+}
+
+void StereoMatching::combine2Vm_3(vector<Mat>& vm, vector<Mat>& vm2)
+{
+	int imgNum = Do_refine ? 2 : 1;
+	//Mat mask(h_, w_, CV_8U, Scalar::all(0));
+	int step = 0;
+	float* vmP[2];
+	float disThres = 0;
+	for (int n = 0; n < imgNum; n++)
+	{
+		if (n == 0)
+		{
+			arm_Mask.create(h_, w_, CV_8U);
+			arm_Mask = 0;
+		}
+
+		int step = 0;
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* armP = arm_Mask.ptr<uchar>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				vmP[0] = vm[n].ptr<float>(v, u);
+				vmP[1] = vm2[n].ptr<float>(v, u);
+
+				float c_min[2];
+				for (int w = 0; w < 2; w++)
+				{
+					c_min[w] = vmP[w][0];
+					for (int d = 1; d < d_; d++)
+					{
+						if (c_min[w] > vmP[w][d])
+							c_min[w] = vmP[w][d];
+					}
+				}
+
+				bool choseISSmall = true;
+				if (c_min[1] < c_min[0])
+				{
+					float dis = c_min[0] - c_min[1];
+					if (dis / c_min[0] > disThres)
+						choseISSmall = false;
+						//choseISSmall = false;
+				}
+				if (!choseISSmall)
+				{
+					step++;
+					armP[u] = 1;
+					for (int d = 0; d < d_; d++)
+						vmP[0][d] = 0.3 * vmP[0][d] + 0.7 * vmP[1][d];
+				}
+			}
+		}
+		cout << "step: " << step << endl;
+	}
+}
+
+void StereoMatching::combine2Vm_4(vector<Mat>& vm, vector<Mat>& vm2)
+{
+	int imgNum = Do_refine ? 2 : 1;
+	//Mat mask(h_, w_, CV_8U, Scalar::all(0));
+	int step = 0;
+	float* vmP[2];
+	float disThres = 0;
+
+	arm_Lst.create(h_, w_, CV_32F);
+	for (int v = 0; v < h_; v++)
+	{
+		float* armLP = arm_Lst.ptr<float>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			ushort* crossP = HVL[0].ptr<ushort>(v, u);
+			ushort lst = crossP[0];
+			for (int num = 1; num < 4; num++)
+			{
+				lst = max(lst, crossP[num]);
+			}
+			armLP[u] = lst;
+		}
+	}
+	boxFilter(arm_Lst, arm_Lst, -1, Size(3, 3));
+	const float armLthres = 5;
+
+	for (int n = 0; n < imgNum; n++)
+	{
+		if (n == 0)
+		{
+			arm_Mask.create(h_, w_, CV_8U);
+			arm_Mask = 0;
+		}
+
+		int step = 0;
+		for (int v = 0; v < h_; v++)
+		{
+			uchar* armP = arm_Mask.ptr<uchar>(v);
+			float* armLP = arm_Lst.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				vmP[0] = vm[n].ptr<float>(v, u);
+				vmP[1] = vm2[n].ptr<float>(v, u);
+				if (armLP[u] < armLthres)
+				{
+					armP[u] = 1;
+					for (int d = 0; d < d_; d++)
+					{
+						//vmP[0][d] = vmP[0][d] * 0.3 + vmP[1][d] * 0.7;
+						vmP[0][d] = vmP[0][d] * 0 + vmP[1][d] * 1;
+					}
+				}
+				
+
+			}
+		}
+		cout << "step: " << step << endl;
+	}
+}
+
+void StereoMatching::CBCA()
+{
+	if (true)
+	{
+		if (param_.cbca_double_win)
+		{
+			vector<Mat> vm2(2);
+			vm2[0] = vm[0].clone();
+			vm2[1] = vm[1].clone();
+			initArm();
+			calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[1], param_.cbca_crossL_out[1], param_.cbca_cTresh[1], param_.cbca_cTresh_out[1]);
+			cbca_core(HVL, HVL_INTERSECTION, vm2, 2);  // ´ó´°¿Ú
+
+			calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[0], param_.cbca_crossL_out[0], param_.cbca_cTresh[0], param_.cbca_cTresh_out[0]);
+			cbca_core(HVL, HVL_INTERSECTION, vm, 2);  // Ô­Ê¼´°¿Ú
+			//cbca_aggregate(2, vm2);
+			//cbca_aggregate(0, vm);
+
+			//combine2Vm(vm, vm2);
+			//combine2Vm_2(vm, vm2, HVL);
+			//combine2Vm_3(vm, vm2);
+			combine2Vm_4(vm, vm2);
+			//vm[0] = vm[0] * 0.7+ vm2[0]*0.3;
+			//vm[1] = vm[1] * 0.7 + vm2[1] * 0.3;
+		}
+		else
+			cbca_aggregate(0, vm);
+	}
+	else
+	{
+		//vector<Mat> vm_res(2);
+		//vector<Mat> disp_res(2);
+		//vm_res[0] = vm[0].clone();
+		//vm_res[1] = vm[1].clone();
+		//for (int i = 0; i < 2; i++)
+		//{
+		//	//boxFilter(vm_res[i], vm_res[i], -1, Size(5, 5));
+		//	ximgproc::guidedFilter(I_c[i], vm_res[i], vm_res[i], param_.gf_r[0], param_.gf_eps[0]);  // gf_r gf_eps
+		//	disp_res[i].create(h_, w_, CV_16S);
+		//}
+		//for (int i = 0; i < 2; i++)
+		//{
+		//	gen_dispFromVm(vm_res[i], disp_res[i]);
+		//	if (i == 0)
+		//		saveFromDisp<short>(disp_res[i], "box(5,5)", false, true);
+		//}
+		//Mat dp_copy = disp_res[0].clone();
+		//LRConsistencyCheck(dp_copy, disp_res[1], LRC_Err_Mask);
+		//LRConsistencyCheck(disp_res[0], disp_res[1], LRC_Err_Mask, 1);
+		//dp_copy.copyTo(disp_res[0]);
+		//vector<int> L = { 17, 34 };
+		//vector<int> thresh = { 20, 5};
+		vector<int> L = { 5, 10, 15, 20, 34};
+		vector<int> thresh = { 20, 17, 15, 10, 5};
+		//vector<int> L = { 5, 15, 25, 35 };
+		//vector<int> thresh = { 30, 20, 5, 3 };
+
+		initArm();
+		//calArms<short>(disp_res, HVL, HVL_INTERSECTION, 17, 34, 5, 3);
+		//calArms<short>(disp_res, HVL, HVL_INTERSECTION, 10, 1, 20, 3, 30, 5);
+		//calArms<short>(disp_res, HVL, HVL_INTERSECTION, 10, 2 34, 2);
+		//calArms<uchar>(HVL, HVL_INTERSECTION, I_c, 17, 20);
+		//calArms<uchar>(I_c, HVL, HVL_INTERSECTION, 17, 20);
+		//calArms<uchar>(I_c, HVL, HVL_INTERSECTION, 5, 15, 30, 30, 20, 5);
+		//calArms<uchar>(I_c, HVL, HVL_INTERSECTION, 17, 34, 20, 5);
+		calArms<uchar>(I_c, HVL, HVL_INTERSECTION, L, thresh);
+		cbca_core(HVL, HVL_INTERSECTION, vm, 2);
+	}
+
+}
+
+void StereoMatching::GF()
+{
+	if (param_.GF_double_win)
+	{
+		//vector<Mat> vm2(2);
+		//vm2[0] = vm[0].clone();
+		//vm2[1] = vm[1].clone();
+		guideFilter(0, vm);
+		//guideFilter(1, vm2);
+		//combine2Vm(vm, vm2);
+		//vm[0] = vm[0] * 0.7+ vm2[0]*0.3;
+		//vm[1] = vm[1] * 0.7 + vm2[1] * 0.3;
+	}
+	else
+		guideFilter(0, vm);
+}
+
+void StereoMatching::GFNL()
+{
+	Mat vm_res = vm[0].clone();
+	guideFilter(0, vm);
+
+	NLCCA nl;
+	Mat imgL_f, imgR_f;
+	I_c[0].copyTo(imgL_f);
+	I_c[1].copyTo(imgR_f);
+	nl.aggreCV(imgL_f, imgR_f, param_.numDisparities, vm_res);
+	Mat wetNL(h_, w_, CV_32FC(d_));
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			float* wP = wetNL.ptr<float>(v, u);
+			for (int d = 0; d < d_; d++)
+				wP[d] = 1;
+		}
+	}
+	nl.aggreCV(imgL_f, imgR_f, param_.numDisparities, wetNL);
+	vm_res /= wetNL;
+
+	Mat dispMap(h_, w_, CV_16S);
+	gen_dispFromVm(vm_res, dispMap);
+	if (!param_.Do_vmTop)
+		saveFromDisp<short>(dispMap, "NL");
+
+	// Çó·½²î
+	Mat I_f, I_f2, I_f2_mean, I_f_mean, I_f_mean2, I_var;
+	I_g[0].convertTo(I_f, CV_32F);
+
+	multiply(I_f, I_f, I_f2);
+	boxFilter(I_f2, I_f2_mean, -1, Size(19, 19));
+	boxFilter(I_f, I_f_mean, -1, Size(19, 19));
+	multiply(I_f_mean, I_f_mean, I_f_mean2);
+	subtract(I_f2_mean, I_f_mean2, I_var);
+
+	int num = 0;
+	arm_Mask.create(h_, w_, CV_8U);
+	arm_Mask = 0;
+	for (int v = 0; v < h_; v++)
+	{
+		float* IP = I_var.ptr<float>(v);
+		uchar* mP = arm_Mask.ptr<uchar>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			float* vmP = vm[0].ptr<float>(v, u);
+			float* vm_resP = vm_res.ptr<float>(v, u);
+			if (IP[u] < 400)
+			{
+				mP[u] = 1;
+				num++;
+				for (int d = 0; d < d_; d++)
+				{
+					vmP[d] = vm_resP[d];
+				}
+			}
+			else
+			{
+				for (int d = 0; d < d_; d++)
+				{
+					vmP[d] = 0.5 * vm_resP[d] + 0.5 * vmP[d];
+				}
+			}
+		}
+	}
+	cout << "NL num:" << num << endl;
+	//vm[0] = 0.5 * vm[0] + 0.5 * vm_res;
+}
+
+void StereoMatching::guideFilter(int paramNum, vector<Mat>& vm)
 {
 	//vmTrans(vm, guideVm);  // ´Ó3Î¬matÖµ¸³¸ø2Î¬µÄmatÊý×é
 	const int n = param_.numDisparities;
 	vector<Mat> I(2);
 	// xxxx
 
-	for (int i = 0; i < 2; i++)
+	int num = Do_LRConsis && Do_refine ? 2 : 1;
+	for (int i = 0; i < num; i++)
 	{
 		I[i] = param_.gf_channel_isColor ? I_c[i].clone() : I_g[i].clone();
 		I[i].convertTo(I[i], CV_32F);
@@ -2937,12 +4505,13 @@ void StereoMatching::guideFilter()
 		split(vm[i], guideVm[i]);
 		for (int d = 0; d < n; d++)
 		{
-			//guideFilterCore(guideVm[i][d], I_g[i], guideVm[i][d], 9, 0.001); // radius: 8, 4 // epsilon: 500, 0.0001
+			//guideFilterCore(guideVm[i][d], I_g[i], guideVm[i][d], 9, 0.0001); // radius: 8, 4 // epsilon: 500, 0.0001
 			guideVm[i][d] = guideFilterCore_matlab(I[i], guideVm[i][d], 9, 0.0001);
 		}
 		merge(guideVm[i], vm[i]);
 #else
-		ximgproc::guidedFilter(I[i], vm[i], vm[i], param_.gf_r, param_.gf_eps);  // gf_r gf_eps
+		ximgproc::guidedFilter(I[i], vm[i], vm[i], param_.gf_r[paramNum], param_.gf_eps[paramNum]);  // gf_r gf_eps
+
 #endif
 	}
 	//vmTrans(guideVm, vm); // ´Ó2Î¬matÊý×é¸³Îª3Î¬µÄmat
@@ -2959,13 +4528,392 @@ void StereoMatching::guideFilter()
 		Mat vm_copy = vm[0].clone();
 		selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
 		signCorrectFromTopVm("correctFromTopVmGuide.png", topDisp, DT);
-		//genExcelFromTopDisp(topDisp, DT);
+		//if (object == "teddy")
+			//genExcelFromTopDisp(topDisp, DT);
 		//genDispFromTopCostVm(topDisp, dispMap2);
 		genDispFromTopCostVm2(topDisp, dispMap2);
 		signDispChange_for2Disp(dispMap, dispMap2, DT, I_mask[1], result);
-		saveDispMap<short>(result, "candidate_Change");
+		saveDispMap<short>(result, DT, "candidate_Change");
 		saveFromDisp<short>(dispMap2, "guideCand");
 	}
+}
+
+void StereoMatching::FIF()
+{
+	int img_num = 1;
+	if (Do_refine && Do_LRConsis)
+		img_num = 2;
+
+	const float eps = 0.08;
+	for (int i = 0; i < img_num; i++)
+	{
+		Mat Img_tem;
+		I_c[i].convertTo(Img_tem, CV_32F, 1 / 255.0);
+		Mat wgt_hor(h_, w_, CV_32F);
+		Mat wgt_ver(h_, w_, CV_32F);
+		// ¼ÆËãË®Æ½Á½Á½µã¼äµÄÈ¨ÖØ
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_ - 1; u++)
+			{
+				float* wgt_hP = wgt_hor.ptr<float>(v);
+				float* IP = Img_tem.ptr<float>(v, u);
+				float* IP_nextU = Img_tem.ptr<float>(v, u + 1);
+
+				wgt_hP[u] = pow(IP_nextU[0] - IP[0], 2) + pow(IP_nextU[1] - IP[1], 2) + pow(IP_nextU[2] - IP[2], 2);
+				wgt_hP[u] = exp(-wgt_hP[u] / (eps * eps));  //0.08 ¡°Full-Image Guided Filtering for Fast Stereo Matching¡±
+			}
+		}
+		// ¼ÆËã´¹Ö±Á½Á½µã¼äµÄÈ¨ÖØ
+		for (int v = 0; v < h_ - 1; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* wgt_vP = wgt_ver.ptr<float>(v);
+				float* IP = Img_tem.ptr<float>(v, u);
+				float* IP_nextV = Img_tem.ptr<float>(v + 1, u);
+
+				wgt_vP[u] = pow(IP_nextV[0] - IP[0], 2) + pow(IP_nextV[1] - IP[1], 2) + pow(IP_nextV[2] - IP[2], 2);
+				wgt_vP[u] = exp(-wgt_vP[u] / (eps * eps));  //0.08 ¡°Full-Image Guided Filtering for Fast Stereo Matching¡±
+			}
+		}
+
+		Mat* calcu1 = new Mat[d_];
+		Mat* calcu2 = new Mat[d_];
+		Mat* calcu3 = new Mat[d_];
+		for (int d = 0; d < d_; d++)
+		{
+			calcu1[d] = Mat(h_, w_, CV_32F, Scalar::all(0));
+			calcu2[d] = Mat(h_, w_, CV_32F, Scalar::all(0));
+			calcu3[d] = Mat(h_, w_, CV_32F, Scalar::all(0));
+		}
+		// Ë®Æ½´ú¼Û»ýÀÛ£¨´Ó×óµ½ÓÒ£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu = calcu1[d];
+			for (int v = 0; v < h_; v++)
+			{
+				float* wgt_h = wgt_hor.ptr<float>(v);
+				float* cP = calcu.ptr<float>(v);
+				cP[0] = vm[i].ptr<float>(v, 0)[d];
+				for (int u = 1; u < w_; u++)
+				{
+					cP[u] = vm[i].ptr<float>(v, u)[d] + cP[u - 1] * wgt_h[u - 1];
+				}
+			}
+		}
+		// Ë®Æ½´ú¼Û»ýÀÛ£¨´ÓÓÒµ½×ó£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu = calcu2[d];
+			for (int v = 0; v < h_; v++)
+			{
+				float* wgt_h = wgt_hor.ptr<float>(v);
+				float* cP = calcu.ptr<float>(v);
+				cP[w_ - 1] = vm[i].ptr<float>(v, w_ - 1)[d];
+				for (int u = w_ - 2; u >= 0; u--)
+				{
+					cP[u] = vm[i].ptr<float>(v, u)[d] + cP[u + 1] * wgt_h[u];
+				}
+			}
+		}
+		// Ë®Æ½ºÍ
+		cout << "Ë®Æ½ºÍ" << endl;
+		for (int d = 0; d < d_; d++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				float* c1 = calcu1[d].ptr<float>(v);
+				float* c2 = calcu2[d].ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+				{
+					c1[u] = c1[u] + c2[u] - vm[i].ptr<float>(v, u)[d];
+				}
+			}
+		}
+
+		// ´¹Ö±´ú¼Û»ýÀÛ£¨´ÓÉÏµ½ÏÂ£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu_ori = calcu1[d];
+			Mat calcu_new = calcu2[d];
+			for (int u = 0; u < w_; u++)
+				calcu_new.ptr<float>(0)[u] = calcu_ori.ptr<float>(0)[u];
+			for (int v = 1; v < h_; v++)
+			{
+				float* wgt_v = wgt_ver.ptr<float>(v - 1);
+				float* cP_ori = calcu_ori.ptr<float>(v);
+				float* cP_new_pre = calcu_new.ptr<float>(v - 1);
+				float* cP_new = calcu_new.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+					cP_new[u] = cP_new_pre[u] * wgt_v[u] + cP_ori[u];
+			}
+		}
+		// ´¹Ö±´ú¼Û»ýÀÛ£¨´ÓÏÂµ½ÉÏ£©
+		for (int d = 0; d < d_; d++)
+		{
+			Mat calcu_ori = calcu1[d];
+			Mat calcu_new = calcu3[d];
+			for (int u = 0; u < w_; u++)
+				calcu_new.ptr<float>(h_ - 1)[u] = calcu_ori.ptr<float>(h_ - 1)[u];
+			for (int v = h_ - 2; v >= 0; v--)
+			{
+				float* wgt_v = wgt_ver.ptr<float>(v);
+				float* cP_ori = calcu_ori.ptr<float>(v);
+				float* cP_new_pre = calcu_new.ptr<float>(v + 1);
+				float* cP_new = calcu_new.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+					cP_new[u] = cP_new_pre[u] * wgt_v[u] + cP_ori[u];
+			}
+		}
+		// ´¹Ö±¼ÓºÍ
+		for (int d = 0; d < d_; d++)
+		{
+			for (int v = 0; v < h_; v++)
+			{
+				float* c1 = calcu2[d].ptr<float>(v);
+				float* c2 = calcu3[d].ptr<float>(v);
+				float* origin = calcu1[d].ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+				{
+					c1[u] = c1[u] + c2[u] - origin[u];
+				}
+			}
+		}
+		cout << "´¹Ö±ºÍ" << endl;
+		// ¸üÐÂ
+		for (int d = 0; d < d_; d++)
+		{
+			Mat cNewP = calcu2[d];
+			for (int v = 0; v < h_; v++)
+			{
+				float* cNP = cNewP.ptr<float>(v);
+				for (int u = 0; u < w_; u++)
+					vm[i].ptr<float>(v, u)[d] = cNP[u];
+			}
+		}
+		cout << "¸úÐÂ´ú¼Û¾í" << endl;
+
+		delete[] calcu1;
+		delete[] calcu2;
+		delete[] calcu3;
+		calcu1 = NULL;
+		calcu2 = NULL;
+		calcu3 = NULL;
+	}
+	saveFromVm(vm, "FIF");	
+}
+
+void StereoMatching::FIF_Improve()
+{
+	int img_num = 1;
+	if (Do_refine && Do_LRConsis)
+		img_num = 2;
+
+	const float eps = 0.08;
+	const float Pn = 2;
+	for (int i = 0; i < img_num; i++)
+	{
+		Mat Img_tem;
+		I_c[i].convertTo(Img_tem, CV_32F, 1 / 255.0);
+		Mat wgt_hor(h_, w_, CV_32F);
+		Mat wgt_ver(h_, w_, CV_32F);
+		// ¼ÆËãË®Æ½Á½Á½µã¼äµÄÈ¨ÖØ
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_ - 1; u++)
+			{
+				float* wgt_hP = wgt_hor.ptr<float>(v);
+				float* IP = Img_tem.ptr<float>(v, u);
+				float* IP_nextU = Img_tem.ptr<float>(v, u + 1);
+
+				wgt_hP[u] = pow(IP_nextU[0] - IP[0], 2) + pow(IP_nextU[1] - IP[1], 2) + pow(IP_nextU[2] - IP[2], 2);
+				wgt_hP[u] = exp(-wgt_hP[u] / (eps * eps));  //0.08 ¡°Full-Image Guided Filtering for Fast Stereo Matching¡±
+			}
+		}
+		// ¼ÆËã´¹Ö±Á½Á½µã¼äµÄÈ¨ÖØ
+		for (int v = 0; v < h_ - 1; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* wgt_vP = wgt_ver.ptr<float>(v);
+				float* IP = Img_tem.ptr<float>(v, u);
+				float* IP_nextV = Img_tem.ptr<float>(v + 1, u);
+
+				wgt_vP[u] = pow(IP_nextV[0] - IP[0], 2) + pow(IP_nextV[1] - IP[1], 2) + pow(IP_nextV[2] - IP[2], 2);
+				wgt_vP[u] = exp(-wgt_vP[u] / (eps * eps));  //0.08 ¡°Full-Image Guided Filtering for Fast Stereo Matching¡±
+			}
+		}
+
+		Mat calcu1(h_, w_, CV_32FC(d_), Scalar::all(0));
+		Mat calcu2(h_, w_, CV_32FC(d_), Scalar::all(0));
+		Mat calcu3(h_, w_, CV_32FC(d_), Scalar::all(0));
+
+		// Ë®Æ½´ú¼Û»ýÀÛ£¨´Ó×óµ½ÓÒ£©
+
+		for (int v = 0; v < h_; v++)
+		{
+			float* cP = calcu1.ptr<float>(v, 0);
+			for (int d = 0; d < d_; d++)
+				cP[d] = vm[i].ptr<float>(v, 0)[d];
+			float* wgt_h = wgt_hor.ptr<float>(v);
+			for (int u = 1; u < w_; u++)
+			{
+				cP = calcu1.ptr<float>(v ,u);
+				float* cP_pre = calcu1.ptr<float>(v, u - 1);
+				float* vmP = vm[i].ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+				{
+					float c_dMinus = d > 0 ? cP_pre[d - 1] +  Pn : numeric_limits<float>::max();
+					float c_dPlus = d < d_ - 1 ? cP_pre[d + 1] + Pn : numeric_limits<float>::max();
+					float c_d = cP_pre[d];
+					cP[d] = vmP[d] + min(min(c_dMinus, c_dPlus), c_d) * wgt_h[u - 1];
+				}
+			}
+		}
+		// Ë®Æ½´ú¼Û»ýÀÛ£¨´ÓÓÒµ½×ó£©
+		for (int v = 0; v < h_; v++)
+		{
+			float* cP = calcu2.ptr<float>(v, w_ - 1);
+			for (int d = 0; d < d_; d++)
+				cP[d] = vm[i].ptr<float>(v, w_ - 1)[d];
+
+			float* wgt_h = wgt_hor.ptr<float>(v);
+			for (int u = w_ - 2; u >= 0; u--)
+			{
+				cP = calcu2.ptr<float>(v, u);
+				float* cP_pre = calcu2.ptr<float>(v, u + 1);
+				float* vmP = vm[i].ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+				{
+					float c_dMinus = d > 0 ? cP_pre[d - 1] + Pn : numeric_limits<float>::max();
+					float c_dPlus = d < d_ - 1 ? cP_pre[d + 1] + Pn : numeric_limits<float>::max();
+					float c_d = cP_pre[d];
+					cP[d] = vmP[d] + min(min(c_dMinus, c_dPlus), c_d) * wgt_h[u];
+				}
+			}
+		}
+		// Ë®Æ½ºÍ
+		cout << "Ë®Æ½ºÍ" << endl;
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* c1 = calcu1.ptr<float>(v, u);
+				float* c2 = calcu2.ptr<float>(v, u);
+				float* vmP = vm[i].ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+					c1[d] = c1[d] + c2[d] - vmP[d];
+			}
+		}
+
+		// ´¹Ö±´ú¼Û»ýÀÛ£¨´ÓÉÏµ½ÏÂ£©
+		for (int u = 0; u < w_; u++)
+		{
+			float* cP_new = calcu2.ptr<float>(0, u);
+			float* cP_old = calcu1.ptr<float>(0, u);
+			for (int d = 0; d < d_; d++)
+				cP_new[d] = cP_old[d];
+		}
+		for (int v = 1; v < h_; v++)
+		{
+			float* wgt_v = wgt_ver.ptr<float>(v - 1);
+			for (int u = 0; u < w_; u++)
+			{
+				float* cP_new = calcu2.ptr<float>(v, u);
+				float* cP_newPre = calcu2.ptr<float>(v - 1, u);
+				float* cP_old = calcu1.ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+				{
+					float c_dMinus = d > 0 ? cP_newPre[d - 1] + Pn : numeric_limits<float>::max();
+					float c_dPlus = d < d_ - 1 ? cP_newPre[d + 1] + Pn : numeric_limits<float>::max();
+					float c_d = cP_newPre[d];
+					cP_new[d] = cP_old[d] + min(min(c_dMinus, c_dPlus), c_d) * wgt_v[u];
+				}
+			}
+		}
+
+		// ´¹Ö±´ú¼Û»ýÀÛ£¨´ÓÏÂµ½ÉÏ£©
+		for (int u = 0; u < w_; u++)
+		{
+			float* cP_new = calcu3.ptr<float>(h_ - 1, u);
+			float* cP_old = calcu1.ptr<float>(h_ - 1, u);
+			for (int d = 0; d < d_; d++)
+				cP_new[d] = cP_old[d];
+		}
+		for (int v = h_ - 2; v >= 0; v--)
+		{
+			float* wgt_v = wgt_ver.ptr<float>(v);
+			for (int u = 0; u < w_; u++)
+			{
+				float* cP_new = calcu3.ptr<float>(v, u);
+				float* cP_newPre = calcu3.ptr<float>(v + 1, u);
+				float* cP_old = calcu1.ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+				{
+					float c_dMinus = d > 0 ? cP_newPre[d - 1] + Pn : numeric_limits<float>::max();
+					float c_dPlus = d < d_ - 1 ? cP_newPre[d + 1] + Pn : numeric_limits<float>::max();
+					float c_d = cP_newPre[d];
+					cP_new[d] = cP_old[d] + min(min(c_dMinus, c_dPlus), c_d) * wgt_v[u];
+				}
+			}
+		}
+
+		// ´¹Ö±¼ÓºÍ
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* c1 = calcu2.ptr<float>(v, u);
+				float* c2 = calcu3.ptr<float>(v, u);
+				float* origin = calcu1.ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+					c1[d] = c1[d] + c2[d] - origin[d];
+			}
+		}
+		cout << "´¹Ö±ºÍ" << endl;
+		// ¸üÐÂ
+
+		for (int v = 0; v < h_; v++)
+		{
+			for (int u = 0; u < w_; u++)
+			{
+				float* cP = calcu2.ptr<float>(v, u);
+				float* vmP = vm[i].ptr<float>(v, u);
+				for (int d = 0; d < d_; d++)
+					vmP[d] = cP[d];
+			}
+		}
+		cout << "¸úÐÂ´ú¼Û¾í" << endl;
+	}
+	saveFromVm(vm, "FIF_imp");
+}
+
+void StereoMatching::NL()
+{
+	NLCCA nl;
+	Mat imgL_f, imgR_f;
+	I_c[0].copyTo(imgL_f);
+	I_c[1].copyTo(imgR_f);
+	nl.aggreCV(imgL_f, imgR_f, param_.numDisparities, vm[0]);
+	Mat wetNL(h_, w_, CV_32FC(d_));
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 0; u < w_; u++)
+		{
+			float* wP = wetNL.ptr<float>(v, u);
+			for (int d = 0; d < d_; d++)
+				wP[d] = 1;
+		}
+	}
+	nl.aggreCV(imgL_f, imgR_f, param_.numDisparities, wetNL);
+	vm[0] /= wetNL;
+
+	Mat dispMap(h_, w_, CV_16S);
+	gen_dispFromVm(vm[0], dispMap);
+	if (!param_.Do_vmTop)
+		saveFromDisp<short>(dispMap, "NL");
+	dispMap.convertTo(guideDisp, CV_32F);
 }
 
 void StereoMatching::guideFilterCore(Mat& source, Mat& guided_image, Mat& output, int radius, float epsilon)
@@ -3029,15 +4977,21 @@ Mat StereoMatching::guideFilterCore_matlab(Mat& I, Mat p, int r, float eps)
 	vector<Mat> I_ch;
 	split(I, I_ch);
 
+	Mat N = Mat::ones(h_, w_, CV_32FC1);
+	N = BoxFilter(N, r);
+
 	Mat tem;
 	Size kerS(2 * r + 1, 2 * r + 1);
 	Mat mean_I[3], mean_p, mean_Ip[3], cov_Ip[3];
-	boxFilter(p, mean_p, CV_32F, kerS);
+	//boxFilter(p, mean_p, CV_32F, kerS);
+	mean_p = BoxFilter(p, r) / N;
 	for (int c = 0; c < 3; c++)
 	{
-		boxFilter(I_ch[c], mean_I[c], CV_32F, kerS);
+		//boxFilter(I_ch[c], mean_I[c], CV_32F, kerS);
+		mean_I[c] = BoxFilter(I_ch[c], r) / N;
 		multiply(I_ch[c], p, tem);
-		boxFilter(tem, mean_Ip[c], CV_32F, kerS);
+		//boxFilter(tem, mean_Ip[c], CV_32F, kerS);
+		mean_Ip[c] = BoxFilter(tem, r) / N;
 		multiply(mean_I[c], mean_p, tem);
 		subtract(mean_Ip[c], tem, cov_Ip[c]);
 	}
@@ -3053,7 +5007,8 @@ Mat StereoMatching::guideFilterCore_matlab(Mat& I, Mat p, int r, float eps)
 		for (int c_a = c; c_a < 3; c_a++)
 		{
 			multiply(I_ch[c], I_ch[c_a], tem);
-			boxFilter(tem, var_I[var_index], CV_32F, kerS);
+			//boxFilter(tem, var_I[var_index], CV_32F, kerS);
+			var_I[var_index] = BoxFilter(tem, r) / N;
 			multiply(mean_I[c], mean_I[c_a], tem);
 			var_I[var_index] -= tem;
 			var_index++;
@@ -3134,8 +5089,10 @@ Mat StereoMatching::guideFilterCore_matlab(Mat& I, Mat p, int r, float eps)
 
 	Mat mean_a[3], mean_b;
 	for (int c = 0; c < 3; c++)
-		boxFilter(a[c], mean_a[c], CV_32F, kerS);
-	boxFilter(b, mean_b, CV_32F, kerS);
+		//boxFilter(a[c], mean_a[c], CV_32F, kerS);
+		mean_a[c] = BoxFilter(a[c], r) / N;
+	//boxFilter(b, mean_b, CV_32F, kerS);
+	mean_b = BoxFilter(b, r) / N;
 
 	Mat q = mean_b;
 	for (int c = 0; c < 3; c++)
@@ -3145,6 +5102,110 @@ Mat StereoMatching::guideFilterCore_matlab(Mat& I, Mat p, int r, float eps)
 	}
 	return q;
 }
+
+// cum sum like cumsum in matlab
+Mat StereoMatching::CumSum(const Mat& src, const int d)
+{
+	int H = src.rows;
+	int W = src.cols;
+	Mat dest = Mat::zeros(H, W, src.type());
+
+	if (d == 1) {
+		// summation over column
+		for (int y = 0; y < H; y++) {
+			float* curData = (float*)dest.ptr<float>(y);
+			float* preData = (float*)dest.ptr<float>(y);
+			if (y) {
+				// not first row
+				preData = (float*)dest.ptr<float>(y - 1);
+			}
+			float* srcData = (float*)src.ptr<float>(y);
+			for (int x = 0; x < W; x++) {
+				curData[x] = preData[x] + srcData[x];
+			}
+		}
+	}
+	else {
+		// summation over row
+		for (int y = 0; y < H; y++) {
+			float* curData = (float*)dest.ptr<float>(y);
+			float* srcData = (float*)src.ptr<float>(y);
+			for (int x = 0; x < W; x++) {
+				if (x) {
+					curData[x] = curData[x - 1] + srcData[x];
+				}
+				else {
+					curData[x] = srcData[x];
+				}
+			}
+		}
+	}
+	return dest;
+}
+//  %   BOXFILTER   O(1) time box filtering using cumulative sum
+//	%
+//	%   - Definition imDst(x, y)=sum(sum(imSrc(x-r:x+r,y-r:y+r)));
+//  %   - Running time independent of r; 
+//  %   - Equivalent to the function: colfilt(imSrc, [2*r+1, 2*r+1], 'sliding', @sum);
+//  %   - But much faster.
+Mat StereoMatching::BoxFilter(const Mat& imSrc, const int r)
+{
+	int H = imSrc.rows;
+	int W = imSrc.cols;
+	// image size must large than filter size
+	CV_Assert(W >= r && H >= r);
+	Mat imDst = Mat::zeros(H, W, imSrc.type());
+	// cumulative sum over Y axis
+	Mat imCum = CumSum(imSrc, 1);
+	// difference along Y ( [ 0, r ], [r + 1, H - r - 1], [ H - r, H ] )
+	for (int y = 0; y < r + 1; y++) {
+		float* dstData = (float*)imDst.ptr<float>(y);
+		float* plusData = (float*)imCum.ptr<float>(y + r);
+		for (int x = 0; x < W; x++) {
+			dstData[x] = plusData[x];
+		}
+
+	}
+	for (int y = r + 1; y < H - r; y++) {
+		float* dstData = (float*)imDst.ptr<float>(y);
+		float* minusData = (float*)imCum.ptr<float>(y - r - 1);
+		float* plusData = (float*)imCum.ptr<float>(y + r);
+		for (int x = 0; x < W; x++) {
+			dstData[x] = plusData[x] - minusData[x];
+		}
+	}
+	for (int y = H - r; y < H; y++) {
+		float* dstData = (float*)imDst.ptr<float>(y);
+		float* minusData = (float*)imCum.ptr<float>(y - r - 1);
+		float* plusData = (float*)imCum.ptr<float>(H - 1);
+		for (int x = 0; x < W; x++) {
+			dstData[x] = plusData[x] - minusData[x];
+		}
+	}
+
+	// cumulative sum over X axis
+	imCum = CumSum(imDst, 2);
+	for (int y = 0; y < H; y++) {
+		float* dstData = (float*)imDst.ptr<float>(y);
+		float* cumData = (float*)imCum.ptr<float>(y);
+		for (int x = 0; x < r + 1; x++) {
+			dstData[x] = cumData[x + r];
+		}
+		for (int x = r + 1; x < W - r; x++) {
+			dstData[x] = cumData[x + r] - cumData[x - r - 1];
+		}
+		for (int x = W - r; x < W; x++) {
+			dstData[x] = cumData[W - 1] - cumData[x - r - 1];
+		}
+	}
+	return imDst;
+}
+//  %   GUIDEDFILTER   O(1) time implementation of guided filter.
+//	%
+//	%   - guidance image: I (should be a gray-scale/single channel image)
+//	%   - filtering input image: p (should be a gray-scale/single channel image)
+//	%   - local window radius: r
+//	%   - regularization parameter: eps
 
 void StereoMatching::vmTrans(vector<Mat>& vm, vector<vector<Mat>>& guideVm)
 {
@@ -3198,15 +5259,15 @@ void StereoMatching::adCensus(vector<Mat>& adVm, vector<Mat>& cenVm)
 			if (!param_.has_initArm)
 				initArm();
 			if (!param_.has_calArms)
-				calArms();
-			gen_vm_from2vm_expadpWgt(HVL[i], vm[i], adVm[i], cenVm[i], 5, 10, i);
+				calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[0], param_.cbca_crossL_out[0], param_.cbca_cTresh[0], param_.cbca_cTresh_out[0]);
+			gen_vm_from2vm_expadpWgt(HVL[i], vm[i], adVm[i], cenVm[i], 10, 30, i);
 		}
 		else
 		{
 			//addWeighted(adVm[i], 0.45, cenVm[i], 0.55, 0, vm[i]);
 			//xxxxx
 			//gen_vm_from2vm_add(vm[i], adVm[i], cenVm[i], i);
-			gen_vm_from2vm_exp(vm[i], adVm[i], cenVm[i], 5, 10, i); // lamAD 10 5 3.5, lamC 30 10 0.3
+			gen_vm_from2vm_exp(vm[i], adVm[i], cenVm[i], 10, 30, i); // lamAD 10 5 3.5, lamC 30 10 0.3
 		}
 	}
 #ifdef DEBUG
@@ -3222,7 +5283,8 @@ void StereoMatching::adCensuGradCombine(vector<Mat>& adVm, vector<Mat>& cenVm, v
 	int imgNum = Do_LRConsis ? 2 : 1;
 	for (int i = 0; i < imgNum; i++)
 	{
-		gen_vm_from3vm_exp(vm[i], adVm[i], cenVm[i], gradVm[i], 5, 10, 2, i);
+		//gen_vm_from3vm_exp(vm[i], adVm[i], cenVm[i], gradVm[i], 5, 10, 2, i);
+		gen_vm_from3vm_exp(vm[i], adVm[i], cenVm[i], gradVm[i], 30, 45, 15, i);
 		//gen_vm_from3vm_add(vm[i], adVm[i], cenVm[i], gradVm[i], i);
 	}
 #ifdef DEBUG
@@ -3289,55 +5351,189 @@ void StereoMatching::genCensus(cv::Mat& img, cv::Mat& censusCode, int R_V, int R
 }
 
 // ¼ÆËã×óÓÒÍ¼µÄÃ¿¸öµãµÄ×ó¡¢ÓÒ¡¢ÉÏ¡¢ÏÂËÄÌõ±ÛµÄ³¤¶È£¨×î¶Ì¿ÉÒÔÊÇ0£©**ÐèÒªÕÒÒ»¸ö²ÎÊýÀ´¿ØÖÆ±ÛµÄ×î¶Ì³¤¶È
-void StereoMatching::calArms()
+template <typename T>
+void StereoMatching::calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, int L, int L_out, int cTresh, int cTresh_out)
 {
-	int channels = cbca_genArm_isColor ? 3 : 1;
-	const uchar C_D = param_.Cross_C;  // 20
-	const uchar C_D_out = 6;
+	const uchar minL = param_.cbca_minArmL;  // 1
+
+	for (int num = 0; num < 2; num++)
+	{
+		cout << "start cal horVerArm for img " << num << endl;
+		//if (param_.cbca_use_adpArm)
+			//calHorVerDis2(num, channels, L / param_.disSc, L_out / param_.disSc, cTresh, cTresh_out, minL);
+			//calHorVerDis2(num, channels, L / param_.disSc, L_out / param_.disSc, cTresh, cTresh_out, minL);
+		//else
+			//calHorVerDis(num, channels, L / param_.disSc, L_out / param_.disSc, cTresh, cTresh_out, minL);
+		{
+			int scale = 1;
+			if (param_.disSc > 1)
+				scale = param_.disSc;
+			calHorVerDis<T>(I[num], cross[num], L / scale, L_out / scale , cTresh, cTresh_out, minL);
+			//calHorVerDis<T>(I[num], cross[num], L / scale, cTresh, minL);
+		}
+
+			
+		//if (num == 0 && object == "teddy")
+		//{
+		//	int v[] = {28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299};
+		//	int u[] = {381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198};
+		//	drawArmForPoint(HVL[0], v, u, 12);
+		//}
+
+	
+		cout << "finish cal horVerArm for img " << num << endl;
+	}
+	// Éú³É×óÓÒÍ¼Ã¿¸öµãÔÚÃ¿¸öÊÓ²îÏÂµÄË®Æ½¡¢ÊúÖ±Öá£¨Í¨¹ý½»ÔËËã£©£¬´æ³ÉÒ»¸öh*w*n*4µÄmat
+	if (param_.cbca_intersect)
+		genTrueHorVerArms(cross, cross_intersec);
+
+	param_.has_calArms = 1;
+	cout << "HVL generated" << endl;
+}
+
+template <typename T>
+void StereoMatching::calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, int L, int cTresh)
+{
 	const uchar minL = param_.cbca_minArmL;  // 1
 
 	for (int num = 0; num < HVL_num; num++)
 	{
 		cout << "start cal horVerArm for img " << num << endl;
-		const uchar L = param_.cbca_crossL[0];  // 17
-		const uchar L_out = param_.cbca_crossL_out[0];  // 34  
-		calHorVerDis(num, channels, L, L_out, C_D, C_D_out, minL);
-		if (num == 0 && object == "teddy")
-		{
-			int v[] = {28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299};
-			int u[] = {381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198};
-			drawArmForPoint(HVL[0], v, u, 12);
-		}
+			//calHorVerDis(num, channels, L / param_.disSc, L_out / param_.disSc, cTresh, cTresh_out, minL);
+		int scale = 1;
+		if (param_.disSc > 1)
+			scale = param_.disSc;
+		calHorVerDis<T>(I[num], cross[num], L / scale, cTresh / scale, minL);
 
-		// Éú³É×óÓÒÍ¼Ã¿¸öµãÔÚÃ¿¸öÊÓ²îÏÂµÄË®Æ½¡¢ÊúÖ±Öá£¨Í¨¹ý½»ÔËËã£©£¬´æ³ÉÒ»¸öh*w*n*4µÄmat
-		if (param_.cbca_intersect)
-			genTrueHorVerArms();
+
+		//if (num == 0 && object == "teddy")
+		//{
+			//int v[] = {28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299, 237, 145, 37, 44};
+			//int u[] = {381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198, 246, 310, 361, 386};
+			//drawArmForPoint(HVL[0], v, u, 16);
+		//}
+
 
 		cout << "finish cal horVerArm for img " << num << endl;
 	}
+	// Éú³É×óÓÒÍ¼Ã¿¸öµãÔÚÃ¿¸öÊÓ²îÏÂµÄË®Æ½¡¢ÊúÖ±Öá£¨Í¨¹ý½»ÔËËã£©£¬´æ³ÉÒ»¸öh*w*n*4µÄmat
+	if (param_.cbca_intersect)
+		genTrueHorVerArms(cross, cross_intersec);
+
 	param_.has_calArms = 1;
 	cout << "HVL generated" << endl;
+}
+
+template <typename T>
+void StereoMatching::calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, int L0, int L1, int L2, int tresh0, int tresh1, int tresh2)
+{
+	const uchar minL = param_.cbca_minArmL;  // 1
+
+	for (int num = 0; num < 2; num++)
+	{
+		cout << "start cal horVerArm for img " << num << endl;
+
+		{
+			int scale = 1;
+			if (param_.disSc > 1)
+				scale = param_.disSc;
+			calHorVerDis<T>(I[num], cross[num], L0 / scale, L1 / scale, L2 / scale, tresh0, tresh1, tresh2, minL);
+		}
+
+
+		cout << "finish cal horVerArm for img " << num << endl;
+	}
+	// Éú³É×óÓÒÍ¼Ã¿¸öµãÔÚÃ¿¸öÊÓ²îÏÂµÄË®Æ½¡¢ÊúÖ±Öá£¨Í¨¹ý½»ÔËËã£©£¬´æ³ÉÒ»¸öh*w*n*4µÄmat
+	if (param_.cbca_intersect)
+		genTrueHorVerArms(cross, cross_intersec);
+
+	param_.has_calArms = 1;
+	cout << "HVL generated" << endl;
+}
+
+template <typename T>
+void StereoMatching::calArms(vector<Mat>& I, vector<Mat>& cross, vector<Mat>& cross_intersec, vector<int> L, vector<int> thres)
+{
+	const uchar minL = param_.cbca_minArmL;  // 1
+	for (int n = 0; n < L.size(); n++)
+	{
+		L[n] /=param_.disSc;
+	}
+
+	for (int num = 0; num < 2; num++)
+		calHorVerDis<T>(I[num], cross[num], L, thres, minL);
+
+	// Éú³É×óÓÒÍ¼Ã¿¸öµãÔÚÃ¿¸öÊÓ²îÏÂµÄË®Æ½¡¢ÊúÖ±Öá£¨Í¨¹ý½»ÔËËã£©£¬´æ³ÉÒ»¸öh*w*n*4µÄmat
+	if (param_.cbca_intersect)
+		genTrueHorVerArms(cross, cross_intersec);
+
+	param_.has_calArms = 1;
+	cout << "HVL generated" << endl;
+}
+
+
+void StereoMatching::showArms(int v, int u) 
+{
+	Mat out = I_c[0].clone();
+	ushort* armP = HVL[0].ptr<ushort>(v, u);
+	int left = armP[0];
+	int right = armP[1];
+	int up = armP[2];
+	int down = armP[3];
+
+	for (int du = -left; du <= right; du++)
+	{
+		uchar* hp = out.ptr<uchar>(v, u + du);
+		hp[0] = 15;
+		hp[1] = 55;
+		hp[2] = 105;
+	}
+	for (int dv = -up; dv <= down; dv++)
+	{
+		uchar* vp = out.ptr<uchar>(v + dv, u);
+		vp[0] = 15;
+		vp[1] = 55;
+		vp[2] = 105;
+	}
+	string name = "arm_y";
+	imwrite(param_.savePath + name + ".png", out);
+
+	string addr = param_.savePath + name + ".txt";
+	ofstream fout;
+	fout.open(addr, ios::app | ios::out);
+	if (fout.is_open())
+	{
+		fout << "v: " << v << ", u:" << u << "\n";
+
+		fout << "l:" << left << "\t";
+		fout << "r:" << right << "\t";
+		fout << "u:" << up << "\t";
+		fout << "d:" << down << "\t";
+		fout << "\n";
+		fout.close();
+	}
+	else
+	{
+		cout << "can't write HVL to txt" << endl;
+		exit(0);
+	}
 }
 
 void StereoMatching::calTileArms()
 {
 	int channels = cbca_genArm_isColor ? 3 : 1;
-	const uchar C_D = param_.Cross_C;  // 20
-	const uchar C_D_out = 6;
 	const uchar minL = param_.cbca_minArmL;  // 1
 
 	for (int num = 0; num < TileL_num; num++)
 	{
 		cout << "start cal horVerArm for img " << num << endl;
-		const uchar L = param_.cbca_crossL[0];  // 17
-		const uchar L_out = param_.cbca_crossL_out[0];  // 34  
-		calTileDis(num, channels, L, L_out, C_D, C_D_out, minL); // yyyyyy
-		if (num == 0 && object == "teddy")
-		{
-			int v[] = { 28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299 };
-			int u[] = { 381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198 };
-			drawArmForPoint(tileCrossL[0], v, u, 12);
-		}
+		calTileDis(num, channels, param_.cbca_crossL[0], param_.cbca_crossL_out[0], param_.cbca_cTresh[0], param_.cbca_cTresh_out[0], minL); // yyyyyy
+		//if (num == 0 && object == "teddy")
+		//{
+		//	int v[] = { 28, 58, 68, 371, 361, 370, 27, 65, 98, 150, 204, 299 };
+		//	int u[] = { 381, 310, 308, 76, 162, 225, 177, 316, 363, 345, 312, 198 };
+		//	drawArmForPoint(tileCrossL[0], v, u, 12);
+		//}
 
 		// Éú³É×óÓÒÍ¼Ã¿¸öµãÔÚÃ¿¸öÊÓ²îÏÂµÄË®Æ½¡¢ÊúÖ±Öá£¨Í¨¹ý½»ÔËËã£©£¬´æ³ÉÒ»¸öh*w*n*4µÄmat
 		//if (param_.cbca_intersect)
@@ -3365,7 +5561,6 @@ void StereoMatching::initArm()
 		HVL_INTERSECTION[i].create(4, HVL_IS_size, CV_16U);
 	}
 	param_.has_initArm = 1;
-	/////
 }
 
 void StereoMatching::initTileArm()
@@ -3387,34 +5582,24 @@ void StereoMatching::initTileArm()
 	/////
 }
 
-void StereoMatching::cbca_aggregate()
+void StereoMatching::cbca_core( vector<Mat>& HVL, vector<Mat>& HVL_INTERSECTION, vector<Mat>& vm, int ITNUM)
 {
 	cout << "\n" << endl;
 	cout << "start CBCA aggregation" << endl;
 	clock_t start = clock();
 
-	// ¼ÆËã±Û³¤
-	if (!param_.has_calArms)
-		calArms();
-
-	int imgNum = Do_LRConsis ? 2 : 1;
+	int du[2] = { -1, 0 }, dv[2] = { 0, -1 };  // ±íÊ¾Ç°ÃæÒ»µãµÄÎ»ÖÃ
+	int imgNum = Do_refine && Do_LRConsis ? 2 : 1;
 
 	Mat dispMap(h_, w_, CV_16S);
 	Mat dispMap2(h_, w_, CV_16S);
 	Mat result(h_, w_, CV_16S);
 
-	int du[2] = { -1, 0 }, dv[2] = { 0, -1 };
-
-	Mat disp_res(h_, w_, CV_16S);
-	gen_dispFromVm(vm[0], disp_res);
-	Mat disp_lastIte_save = disp_res.clone();
-	Mat cross, crossIntersec, area, areaIS, vm_copy;
+	Mat area, areaIS, vm_copy;
 	for (int LOR = 0; LOR < imgNum; LOR++)
 	{
-		for (int agItNum = 0; agItNum < param_.cbca_iterationNum; agItNum++)
+		for (int agItNum = 0; agItNum < ITNUM; agItNum++)
 		{
-			cout << "start img " << LOR << " crossIteration " << agItNum << endl;
-
 			if (param_.cbca_intersect)
 				areaIS = Mat(3, size_vm, CV_32S, Scalar::all(1));
 			else
@@ -3435,19 +5620,14 @@ void StereoMatching::cbca_aggregate()
 				cal1DCost(vm[LOR], HVL[LOR], area, areaIS, HVL_INTERSECTION[LOR], dv[0], du[0], 0);
 			}
 			genfinalVm_cbca(vm[LOR], area, areaIS, LOR);
-			if (LOR == 0 && agItNum == 0)
-			{
-				gen_dispFromVm(vm[LOR], dispMap);
-				disp_lastIte_save = dispMap.clone();
-			}
 
 			clock_t end_inner = clock();
 			clock_t time_inner = end_inner - start_inner;
 			cout << "time: " << time_inner << endl;
+#ifdef DEBUG
 			if (LOR == 0)
-			{
 				saveTime(time_inner, "cbciInner0");
-			}
+#endif // DEBUG
 			cout << "img " << LOR << " aggregation " << agItNum << " finished " << endl;
 #ifdef DEBUG
 			if (LOR == 0)
@@ -3462,59 +5642,108 @@ void StereoMatching::cbca_aggregate()
 					vm_copy = vm[0].clone();
 					selectTopCostFromVolumn(vm_copy, topDisp, param_.vmTop_thres);
 					signCorrectFromTopVm("correctFromTopVmCBCA" + to_string(agItNum) + ".png", topDisp, DT);
-					genExcelFromTopDisp(topDisp, DT);
+					//if (object == "teddy")
+						//genExcelFromTopDisp(topDisp, DT);
 					//genDispFromTopCostVm(topDisp, dispMap2);
 					genDispFromTopCostVm2(topDisp, dispMap2);
 					signDispChange_for2Disp(dispMap, dispMap2, DT, I_mask[1], result);
-					saveDispMap<short>(result, "candidate_Change" + to_string(agItNum));
+					saveDispMap<short>(result, DT, "candidate_Change" + to_string(agItNum));
 					saveFromDisp<short>(dispMap2, "cbcatopVm" + to_string(agItNum));
 				}
 			}
-			cout << "cbca aggregation iteration:" + to_string(agItNum) + " finished" << endl;
 #endif // DEBUG
 		}
 	}
 	clock_t end = clock();
 	clock_t time = end - start;
+	cout << "1cbcaTime: " << time << endl;
 	cout << time << endl;
-	saveTime(time, "CBCA aggre");
+	cout << "CBCATime: " << time << endl;
 	cout << "finish CBCA aggregation" << endl;
+#ifdef DEBUG
+	saveTime(time, "CBCA aggre");
+#endif // DEBUG
+}
+
+void StereoMatching::cbca_aggregate(int param_Num, vector<Mat>& vm)
+{
+	cout << "start CBCA aggregation" << endl;
+	clock_t start = clock();
+
+	// ¼ÆËã±Û³¤
+	clock_t armStart = clock();
+	if (!param_.has_initArm)
+		initArm();
+	if (!param_.has_calArms)
+		calArms<uchar>(I_c, HVL, HVL_INTERSECTION, param_.cbca_crossL[param_Num], param_.cbca_crossL_out[param_Num], param_.cbca_cTresh[param_Num], param_.cbca_cTresh_out[param_Num]);
+		//calArms<uchar>(I_c, HVL, HVL_INTERSECTION, 20, 35);
+	
+	cbca_core(HVL, HVL_INTERSECTION, vm, param_.cbca_iterationNum);
+
+	clock_t end = clock();
+	clock_t time = end - start;
+	cout << "cbcaTime: " << time << endl;
+	cout << "finish CBCA aggregation" << endl;
+#ifdef DEBUG
+	saveTime(time, "CBCA");
+#endif // DEBUG
 }
 
 void StereoMatching::AWS()
 {
+#ifdef JBF_STANDARD
+	int num = Do_refine && Do_LRConsis ? 2 : 1;
+	Mat I_tem;
+	for (int i = 0; i < 2; i++)
+	{
+		I_c[i].convertTo(I_tem, CV_32F);
+		vector<Mat> channels;
+		split(vm[i], channels);
+		for (int d = 0; d < d_; d++)
+		{
+			cv::ximgproc::jointBilateralFilter(I_tem, channels[d], channels[d], 35, 5, 17.5);
+			cout << "JBF--";
+		}
+		cout << endl;
+		merge(channels, vm[i]);
+	}
+
+#else
 	const auto t1 = std::chrono::system_clock::now();
 	std::cout << "AWS start" << endl;
 	// ¼ÆËãÄÚ²¿ÇøÓò´ú¼Û
 	const int W_U_AWS = 17, W_V_AWS = 17;
-	const int n = param_.numDisparities;
 	const int W_S = (W_U_AWS * 2 + 1) * (W_V_AWS * 2 + 1);
-	const int HI_L = W_U_AWS;  // ×óÓÒ±ßÔµÍùÍâÍØÕ¹µÄ³¤¶È
+	//const int HI_L = W_U_AWS;  // ×óÓÒ±ßÔµÍùÍâÍØÕ¹µÄ³¤¶È
 	int size_wt[] = { h_, w_, W_S };
-	Mat wt[2], vmTem[2], Lab[2], I_IpolBorder[2], vm_IB[2];
-	int size_vmIB[] = { h_ + W_V_AWS * 2, w_ + HI_L * 2, param_.numDisparities };
+	Mat wt[2], Lab[2], vm_IB[2];
+	int size_vmIB[] = { h_ + W_V_AWS * 2, w_ + W_U_AWS * 2, param_.numDisparities };
 	int loopNum = Do_LRConsis ? 2 : 1;
-	for (int i = 0; i < loopNum; i++)
-	{
-		vmTem[i].create(3, size_vm, CV_32F);
-		initializeMat<float>(vmTem[i], W_S * 3);
-		vm_IB[i].create(3, size_vmIB, CV_32F);
-	}
+	//for (int i = 0; i < loopNum; i++)
+	//{
+	//	vmTem[i].create(3, size_vm, CV_32F);
+	//	initializeMat<float>(vmTem[i], W_S * 3);
+	//	vm_IB[i].create(3, size_vmIB, CV_32F);
+	//}
 	for (int i = 0; i < 2; i++)
 	{
 		wt[i].create(3, size_wt, CV_32F);
 		//copyMakeBorder(I_c[i], I_IpolBorder[i], W_V_AWS, W_V_AWS, 0, 0, BORDER_REFLECT_101);
-		copyMakeBorder(I_c[i], I_IpolBorder[i], W_V_AWS, W_V_AWS, HI_L, HI_L, BORDER_REFLECT_101);
-		cv::cvtColor(I_IpolBorder[i], Lab[i], COLOR_BGR2Lab);
+		copyMakeBorder(I_c[i], Lab[i], W_V_AWS, W_V_AWS, W_U_AWS, W_U_AWS, BORDER_REFLECT_101);
+		cv::cvtColor(Lab[i], Lab[i], COLOR_BGR2Lab);
 	}
 
-	genWeight_AWS(0, h_, W_U_AWS - HI_L, w_ - (W_U_AWS - HI_L), W_V_AWS, W_U_AWS, W_V_AWS, HI_L, wt, Lab);
-	genTadVm<0>(I_IpolBorder, vm_IB[0]);
+	genWeight_AWS(W_V_AWS, W_U_AWS, wt[0], Lab[0]);
+	genWeight_AWS(W_V_AWS, W_U_AWS, wt[1], Lab[1]);
+	cout << "finish adapt weight cal" << endl;
+	//genTadVm<0>(I_IpolBorder, vm_IB[0]);
+	//if (Do_LRConsis)
+	//	genTadVm<1>(I_IpolBorder, vm_IB[1]);
+	copyMakeBorder(vm[0], vm_IB[0], W_V_AWS, W_V_AWS, W_U_AWS, W_U_AWS, BORDER_REFLECT_101);
+	copyMakeBorder(vm[1], vm_IB[1], W_V_AWS, W_V_AWS, W_U_AWS, W_U_AWS, BORDER_REFLECT_101);
+	calvm_AWS<0>(W_V_AWS, W_U_AWS, vm[0], wt, vm_IB[0]);
 	if (Do_LRConsis)
-		genTadVm<1>(I_IpolBorder, vm_IB[1]);
-	calvm_AWS<0>(0, h_, W_U_AWS - HI_L, w_ - (W_U_AWS - HI_L), n, W_V_AWS, W_U_AWS, W_V_AWS, HI_L, vmTem[0], wt, vm_IB[0]);
-	if (Do_LRConsis)
-		calvm_AWS<1>(0, h_, W_U_AWS - HI_L, w_ - (W_U_AWS - HI_L), n, W_V_AWS, W_U_AWS, W_V_AWS, HI_L, vmTem[1], wt, vm_IB[1]);
+		calvm_AWS<1>(W_V_AWS, W_U_AWS, vm[1], wt, vm_IB[1]);
 
 	//// ¼ÆËã×óÓÒ±ß½ç´ú¼Û
 	//const int W_V_BORDER = 3, W_U_BORDER = 3;
@@ -3560,12 +5789,14 @@ void StereoMatching::AWS()
 	const auto t2 = std::chrono::system_clock::now();
 	const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
 	cout << "AWS time: " << duration << endl;
+#endif // JBF_STANDARD
 
-	vmTem[0].copyTo(vm[0]);
-	if (Do_LRConsis)
-		vmTem[1].copyTo(vm[1]);
+	
+	
+
 #ifdef DEBUG
 	saveFromVm(vm, "asw");
+	saveTime(duration, "asw");
 #endif // DEBUG
 }
 
@@ -3627,7 +5858,7 @@ void StereoMatching::combine_Cross_FW(Mat& vm_dst, Mat& vm_BF, Mat& area, Mat& a
 	gen_dispFromVm(vm_dst, dispMat2);
 	//signDispChange_forRV(dispMat, dispMat2, );
 	signDispChange_for2Disp(dispMat, dispMat2, DT, I_mask[1], result);
-	saveDispMap<short>(result, "BF-CBBI_Change" + to_string(imgNum));
+	saveDispMap<short>(result, DT, "BF-CBBI_Change" + to_string(imgNum));
 }
 
 void StereoMatching::iterpolateBackground(cv::Mat& ipol)
@@ -3756,6 +5987,7 @@ void StereoMatching::biaryImg(cv::Mat& DP, cv::Mat& DT, cv::Mat& biaryImg)  // Ï
 		}
 	}
 }
+
 
 void StereoMatching::errorMap(cv::Mat& DP, cv::Mat& DT, cv::Mat& errorMap)
 {
@@ -3975,7 +6207,11 @@ void StereoMatching::sgm(cv::Mat& vm, bool leftFirst)  // vmµÄÊý¾ÝÀàÐÍÓÉ´ú¼Û¼ÆËã
 	const int rv[MAX_DIRECTIONS] = { +1, -1, 0, 0, +1, +1, -1, -1 };
 	const int ru[MAX_DIRECTIONS] = { 0, 0, +1, -1, -1, +1, +1, -1 };
 
-	int numOfDirec = param_.sgm_scanNum;
+	//const int rv[MAX_DIRECTIONS] = { 0, 0  };
+	//const int ru[MAX_DIRECTIONS] = { +1, -1 };
+
+	//int numOfDirec = param_.sgm_scanNum;
+	int numOfDirec = 4;
 	L.resize(numOfDirec);
 
 	for (int i = 0; i < numOfDirec; i++)
@@ -3987,17 +6223,621 @@ void StereoMatching::sgm(cv::Mat& vm, bool leftFirst)  // vmµÄÊý¾ÝÀàÐÍÓÉ´ú¼Û¼ÆËã
 	gen_sgm_vm(vm, L, numOfDirec);
 }
 
-int StereoMatching::cal_histogram_for_HV(Mat& dispImg, int v_ancher, int u_ancher, int numThres, float ratioThre)
+
+void StereoMatching::sgm_hori(cv::Mat& vm, bool leftFirst)  // vmµÄÊý¾ÝÀàÐÍÓÉ´ú¼Û¼ÆËã·½·¨¶ø¶¨
 {
-	int n = param_.numDisparities + 1;
+	const int rv[2] = { 0, 0};  // À´Ïò£¨Ç°Ò»¸öµãµÄ·½Ïò£©
+	const int ru[2] = {+1, -1};
+
+	//const int rv[MAX_DIRECTIONS] = { 0, 0  };
+	//const int ru[MAX_DIRECTIONS] = { +1, -1 };
+
+	int numOfDirec = 2;
+	L.resize(numOfDirec);
+
+	Mat vm_res = vm.clone();
+	for (int i = 0; i < numOfDirec; i++)
+	{
+		L[i].create(3, size_vm);
+		costScan(L[i], vm, rv[i], ru[i], leftFirst);
+		cout << "scanLline " << i << "finished" << endl;
+	}
+	gen_sgm_vm(vm, L, numOfDirec);
+	vm = vm - vm_res;
+}
+
+void StereoMatching::sgm_verti(cv::Mat& vm, bool leftFirst)  // vmµÄÊý¾ÝÀàÐÍÓÉ´ú¼Û¼ÆËã·½·¨¶ø¶¨
+{
+	const int rv[2] = { +1, -1 };
+	const int ru[2] = { 0, 0 };
+
+	//const int rv[MAX_DIRECTIONS] = { 0, 0  };
+	//const int ru[MAX_DIRECTIONS] = { +1, -1 };
+
+	int numOfDirec = 2;
+	L.resize(numOfDirec);
+	Mat vm_res = vm.clone();
+
+	for (int i = 0; i < numOfDirec; i++)
+	{
+		L[i].create(3, size_vm);
+		costScan(L[i], vm, rv[i], ru[i], leftFirst);
+		cout << "scanLline " << i << "finished" << endl;
+	}
+	gen_sgm_vm(vm, L, numOfDirec);
+	vm = vm - vm_res;
+}
+
+
+void StereoMatching::so(Mat& vm, Mat& DP, vector<Mat>& I)
+{
+	Mat trace(h_, w_, CV_32SC(d_));
+	vector<float> costCandi(d_, 0);
+
+	// Ç°Ïò´«µÝ
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = 1; u < w_; u++)
+		{
+			
+			uchar* IP = I[0].ptr<uchar>(v, u);
+			uchar* IP_pre = I[0].ptr<uchar>(v, u - 1);
+			float sum = 0;
+			bool L_isDisc = false;
+			for (int c = 0; c < 3; c++)
+			{
+				sum += abs(IP[c] - IP_pre[c]);
+			}
+			sum /= 3;
+			if (sum > 15)
+			{
+				L_isDisc = true;
+				//Pn2 /= 2;
+				//Pn3 /= 2;
+			}
+			
+			float* vmP = vm.ptr<float>(v, u);
+			float* vmPre = vm.ptr<float>(v, u - 1);
+			int* traP = trace.ptr<int>(v, u);
+			for (int d = 0; d < d_; d++)
+			{
+				float Pn = 0.2;
+				float Pn2 = 1.2;  // 0.3
+				float Pn3 = 3.6;   // 0.9
+				//bool R_isDisc = false;
+				//if (u - d - 1 >= 0)
+				//{
+				//	uchar* IP_r = I[1].ptr<uchar>(v, u - d);
+				//	uchar* IP_r_pre = I[1].ptr<uchar>(v, u - d - 1);
+				//	float sum = 0;
+				//	for (int c = 0; c < 3; c++)
+				//	{
+				//		sum += abs(IP_r[c] - IP_r_pre[c]);
+				//	}
+				//	sum /= 3;
+				//	if (sum > 15)
+				//	{
+				//		R_isDisc = true;
+				//		//Pn2 /= 2;
+				//		//Pn3 /= 2;
+				//	}
+				//}
+				if (L_isDisc)
+				{
+					Pn2 /= 2;
+					Pn3 /= 2;
+				}
+				//if (L_isDisc && R_isDisc)
+				//{
+				//	Pn2 /= 10;
+				//	Pn3 /= 10;
+				//}
+				//else if (L_isDisc || R_isDisc)
+				//{
+				//	Pn2 /= 4;
+				//	Pn3 /= 4;
+				//}
+				//for (int d_pre = 0; d_pre < d_; d_pre++)
+				//{
+				//	costCandi[d_pre] = vmPre[d_pre] + Pn * abs(d - d_pre);
+				//}
+				//float cost_min = numeric_limits<float>::max();
+				//float d_min = -1;
+				//for (int d = 0; d < d_; d++)
+				//{
+				//	if (costCandi[d] < cost_min)
+				//	{
+				//		cost_min = costCandi[d];
+				//		d_min = d;
+				//	}
+				//}
+				float c_min = vmPre[0];
+				float d_cMin = 0;
+				for (int d_l = 1; d_l < d_; d_l++)
+				{
+					if (vmPre[d_l] < c_min)
+					{
+						c_min = vmPre[d_l];
+						d_cMin = d_l;
+					}
+				}
+				float c_minus = d > 0 ? vmPre[d - 1] + Pn2 : numeric_limits<float>::max();
+				float c_plus = d < d_ - 1 ? vmPre[d + 1] + Pn2 : numeric_limits<float>::max();
+				c_min += Pn3;
+				int d_min = d;
+				float cost_min = vmPre[d];
+				if (c_minus < cost_min)
+				{
+					d_min = d - 1;
+					cost_min = c_minus;
+				}
+				if (c_plus < cost_min)
+				{
+					d_min = d + 1;
+					cost_min = c_plus;
+				}
+				if (c_min < cost_min)
+				{
+					d_min = d_cMin;
+					cost_min = c_min;
+				}
+
+				//vmp[d] += (cost_min - c_min);
+				vmP[d] += cost_min;
+				traP[d] = d_min;
+			}
+		}
+	}
+
+	// ·´Ïò×·×Ù
+	for (int v = 0; v < h_; v++)
+	{
+		short* disp = DP.ptr<short>(v);
+		float c_min = vm.ptr<float>(v, w_ - 1)[0];
+		int d_min = 0;
+		float* cP = vm.ptr<float>(v, w_ - 1);
+		for (int d = 1; d < d_; d++)
+		{
+			if (cP[d] < c_min)
+			{
+				c_min = cP[d];
+				d_min = d;
+			}
+		}
+		disp[w_ - 1] = d_min;
+		for (int u = w_ - 1; u > 0; u--)
+		{
+			int* traP = trace.ptr<int>(v, u);
+			int d_pre = traP[d_min];
+			disp[u - 1] = d_pre;
+			d_min = d_pre;
+		}
+	}
+}
+
+
+void StereoMatching::so_change(Mat& vm, Mat& DP, vector<Mat>& I)
+{
+	Mat trace(h_, w_, CV_32SC(d_));
+	vector<float> costCandi(d_, 0);
+
+	// Ç°Ïò´«µÝ
+	for (int v = 0; v < h_; v++)
+	{
+		short* dP = DP.ptr<short>(v);
+		for (int u = 1; u < w_; u++)
+		{
+			short dP_ref = dP[u - 1];
+			uchar* IP = I[0].ptr<uchar>(v, u);
+			uchar* IP_pre = I[0].ptr<uchar>(v, u - 1);
+			float sum = 0;
+			bool L_isDisc = false;
+			for (int c = 0; c < 3; c++)
+			{
+				sum += abs(IP[c] - IP_pre[c]);
+			}
+			sum /= 3;
+			if (sum > 15)
+			{
+				L_isDisc = true;
+				//Pn2 /= 2;
+				//Pn3 /= 2;
+			}
+
+			float* vmP = vm.ptr<float>(v, u);
+			float* vmPre = vm.ptr<float>(v, u - 1);
+			int* traP = trace.ptr<int>(v, u);
+			for (int d = 0; d < d_; d++)
+			{
+				float Pn = 0.2;
+				float Pn2 = 1.2;  // 0.3
+				float Pn3 = 3.6;   // 0.9
+				float Pn2_ = 2;
+				//bool R_isDisc = false;
+				//if (u - d - 1 >= 0)
+				//{
+				//	uchar* IP_r = I[1].ptr<uchar>(v, u - d);
+				//	uchar* IP_r_pre = I[1].ptr<uchar>(v, u - d - 1);
+				//	float sum = 0;
+				//	for (int c = 0; c < 3; c++)
+				//	{
+				//		sum += abs(IP_r[c] - IP_r_pre[c]);
+				//	}
+				//	sum /= 3;
+				//	if (sum > 15)
+				//	{
+				//		R_isDisc = true;
+				//		//Pn2 /= 2;
+				//		//Pn3 /= 2;
+				//	}
+				//}
+				if (L_isDisc)
+				{
+					Pn2 /= 2;
+					Pn3 /= 2;
+					Pn2_ / 2;
+				}
+				//if (L_isDisc && R_isDisc)
+				//{
+				//	Pn2 /= 10;
+				//	Pn3 /= 10;
+				//}
+				//else if (L_isDisc || R_isDisc)
+				//{
+				//	Pn2 /= 4;
+				//	Pn3 /= 4;
+				//}
+				//for (int d_pre = 0; d_pre < d_; d_pre++)
+				//{
+				//	costCandi[d_pre] = vmPre[d_pre] + Pn * abs(d - d_pre);
+				//}
+				//float cost_min = numeric_limits<float>::max();
+				//float d_min = -1;
+				//for (int d = 0; d < d_; d++)
+				//{
+				//	if (costCandi[d] < cost_min)
+				//	{
+				//		cost_min = costCandi[d];
+				//		d_min = d;
+				//	}
+				//}
+				//float c_min = vmPre[0];
+				//float d_cMin = 0;
+				//for (int d_l = 1; d_l < d_; d_l++)
+				//{
+				//	if (vmPre[d_l] < c_min)
+				//	{
+				//		c_min = vmPre[d_l];
+				//		d_cMin = d_l;
+				//	}
+				//}
+				float c_min = vmPre[dP_ref] + Pn3;
+				float c_minus = d > 0 ? vmPre[d - 1] + Pn2 : numeric_limits<float>::max();
+				float c_plus = d < d_ - 1 ? vmPre[d + 1] + Pn2 : numeric_limits<float>::max();
+				float c_minus_ = d - 2 >= 0 ? vmPre[d - 2] + Pn2_ : numeric_limits<float>::max();
+				float c_plus_ = d + 2 < d_ ? vmPre[d + 2] + Pn2_ : numeric_limits<float>::max();
+				//c_min += Pn3;
+				int d_min = d;
+				float cost_min = vmPre[d];
+				if (c_minus < cost_min)
+				{
+					d_min = d - 1;
+					cost_min = c_minus;
+				}
+				if (c_plus < cost_min)
+				{
+					d_min = d + 1;
+					cost_min = c_plus;
+				}
+				if (c_min < cost_min)
+				{
+					d_min = dP_ref;
+					cost_min = c_min;
+				}
+				if (c_minus_ < cost_min)
+				{
+					d_min = d - 2;
+					cost_min = c_minus_;
+				}
+				if (c_plus_ < cost_min)
+				{
+					d_min = d + 2;
+					cost_min = c_plus_;
+				}
+				//vmP[d] += (cost_min - c_min);
+				vmP[d] += cost_min;
+				traP[d] = d_min;
+			}
+		}
+	}
+
+	// ·´Ïò×·×Ù
+	for (int v = 0; v < h_; v++)
+	{
+		short* disp = DP.ptr<short>(v);
+		float c_min = vm.ptr<float>(v, w_ - 1)[0];
+		int d_min = 0;
+		float* cP = vm.ptr<float>(v, w_ - 1);
+		for (int d = 1; d < d_; d++)
+		{
+			if (cP[d] < c_min)
+			{
+				c_min = cP[d];
+				d_min = d;
+			}
+		}
+		disp[w_ - 1] = d_min;
+		for (int u = w_ - 1; u > 0; u--)
+		{
+			int* traP = trace.ptr<int>(v, u);
+			int d_pre = traP[d_min];
+			disp[u - 1] = d_pre;
+			d_min = d_pre;
+		}
+	}
+}
+
+void StereoMatching::so_T2D(Mat& vm, Mat& DP, vector<Mat>& I)
+{
+	Mat trace(h_, w_, CV_32SC(d_));
+	vector<float> costCandi(d_, 0);
+
+	// Ç°Ïò´«µÝ
+	for (int u = 0; u < w_; u++)
+	{
+		for (int v = 1; v < h_; v++)
+		{
+			uchar* IP = I[0].ptr<uchar>(v, u);
+			uchar* IP_pre = I[0].ptr<uchar>(v - 1, u);
+			float sum = 0;
+			bool L_isDisc = false;
+			for (int c = 0; c < 3; c++)
+			{
+				sum += abs(IP[c] - IP_pre[c]);
+			}
+			sum /= 3;
+			if (sum > 15)
+				L_isDisc = true;
+			float* vmP = vm.ptr<float>(v, u);
+			float* vmPre = vm.ptr<float>(v - 1, u);
+			int* traP = trace.ptr<int>(v, u);
+			for (int d = 0; d < d_; d++)
+			{
+				float Pn = 0.2;
+				float Pn2 = 0.3;  // 0.3
+				float Pn3 = 0.9;   // 0.9
+				if (L_isDisc)
+				{
+					Pn2 /= 2;
+					Pn3 /= 2;
+				}
+				float c_min = vmPre[0];
+				float d_cMin = 0;
+				for (int d_l = 1; d_l < d_; d_l++)
+				{
+					if (vmPre[d_l] < c_min)
+					{
+						c_min = vmPre[d_l];
+						d_cMin = d_l;
+					}
+				}
+				float c_minus = d > 0 ? vmPre[d - 1] + Pn2 : numeric_limits<float>::max();
+				float c_plus = d < d_ - 1 ? vmPre[d + 1] + Pn2 : numeric_limits<float>::max();
+				c_min += Pn3;
+				int d_min = d;
+				float cost_min = vmPre[d];
+				if (c_minus < cost_min)
+				{
+					d_min = d - 1;
+					cost_min = c_minus;
+				}
+				if (c_plus < cost_min)
+				{
+					d_min = d + 1;
+					cost_min = c_plus;
+				}
+				if (c_min < cost_min)
+				{
+					d_min = d_cMin;
+					cost_min = c_min;
+				}
+				vmP[d] += (cost_min - c_min);
+				//vmP[d] += cost_min;
+				traP[d] = d_min;
+			}
+		}
+
+		// ·´Ïò×·×Ù
+		short* disp = DP.ptr<short>(h_ - 1);
+		for (int u = 0; u < w_; u++)
+		{
+			float* vP = vm.ptr<float>(h_ - 1, u);
+			float c_min = vP[0];
+			int d_min = 0;
+			for (int d = 1; d < d_; d++)
+			{
+				if (c_min > vP[d])
+				{
+					c_min = vP[d];
+					d_min = d;
+				}
+			}
+			disp[u] = d_min;
+		}
+		for (int v = h_ - 1; v >= 1; v--)
+		{
+			short* disp = DP.ptr<short>(v);
+			short* disp_pre = DP.ptr<short>(v - 1);
+
+			for (int u = 0; u < w_; u++)
+			{
+				short d = disp[u];
+				int* tP = trace.ptr<int>(v, u);
+				int d_pre = tP[d];
+				disp_pre[u] = d_pre;
+			}
+		}
+	}
+}
+
+void StereoMatching::so_R2L(Mat& vm, Mat& DP, vector<Mat>& I)
+{
+	Mat trace(h_, w_, CV_32SC(d_));
+	vector<float> costCandi(d_, 0);
+
+	// Ç°Ïò´«µÝ
+	for (int v = 0; v < h_; v++)
+	{
+		for (int u = w_ - 2; u >= 0; u--)
+		{
+
+			uchar* IP = I[0].ptr<uchar>(v, u);
+			uchar* IP_pre = I[0].ptr<uchar>(v, u + 1);
+			float sum = 0;
+			bool L_isDisc = false;
+			for (int c = 0; c < 3; c++)
+			{
+				sum += abs(IP[c] - IP_pre[c]);
+			}
+			sum /= 3;
+			if (sum > 15)
+			{
+				L_isDisc = true;
+				//Pn2 /= 2;
+				//Pn3 /= 2;
+			}
+
+			float* vmP = vm.ptr<float>(v, u);
+			float* vmPre = vm.ptr<float>(v, u + 1);
+			int* traP = trace.ptr<int>(v, u);
+			for (int d = 0; d < d_; d++)
+			{
+				float Pn = 0.2;
+				float Pn2 = 0.3;  // 0.3
+				float Pn3 = 0.9;   // 0.9
+				//bool R_isDisc = false;
+				//if (u - d - 1 >= 0)
+				//{
+				//	uchar* IP_r = I[1].ptr<uchar>(v, u - d);
+				//	uchar* IP_r_pre = I[1].ptr<uchar>(v, u - d - 1);
+				//	float sum = 0;
+				//	for (int c = 0; c < 3; c++)
+				//	{
+				//		sum += abs(IP_r[c] - IP_r_pre[c]);
+				//	}
+				//	sum /= 3;
+				//	if (sum > 15)
+				//	{
+				//		R_isDisc = true;
+				//		//Pn2 /= 2;
+				//		//Pn3 /= 2;
+				//	}
+				//}
+				if (L_isDisc)
+				{
+					Pn2 /= 2;
+					Pn3 /= 2;
+				}
+				//if (L_isDisc && R_isDisc)
+				//{
+				//	Pn2 /= 10;
+				//	Pn3 /= 10;
+				//}
+				//else if (L_isDisc || R_isDisc)
+				//{
+				//	Pn2 /= 4;
+				//	Pn3 /= 4;
+				//}
+				//for (int d_pre = 0; d_pre < d_; d_pre++)
+				//{
+				//	costCandi[d_pre] = vmPre[d_pre] + Pn * abs(d - d_pre);
+				//}
+				//float cost_min = numeric_limits<float>::max();
+				//float d_min = -1;
+				//for (int d = 0; d < d_; d++)
+				//{
+				//	if (costCandi[d] < cost_min)
+				//	{
+				//		cost_min = costCandi[d];
+				//		d_min = d;
+				//	}
+				//}
+				float c_min = vmPre[0];
+				float d_cMin = 0;
+				for (int d_l = 1; d_l < d_; d_l++)
+				{
+					if (vmPre[d_l] < c_min)
+					{
+						c_min = vmPre[d_l];
+						d_cMin = d_l;
+					}
+				}
+				float c_minus = d > 0 ? vmPre[d - 1] + Pn2 : numeric_limits<float>::max();
+				float c_plus = d < d_ - 1 ? vmPre[d + 1] + Pn2 : numeric_limits<float>::max();
+				c_min += Pn3;
+				int d_min = d;
+				float cost_min = vmPre[d];
+				if (c_minus < cost_min)
+				{
+					d_min = d - 1;
+					cost_min = c_minus;
+				}
+				if (c_plus < cost_min)
+				{
+					d_min = d + 1;
+					cost_min = c_plus;
+				}
+				if (c_min < cost_min)
+				{
+					d_min = d_cMin;
+					cost_min = c_min;
+				}
+				//vmP[d] += (cost_min - c_min);
+				vmP[d] += cost_min;
+				traP[d] = d_min;
+			}
+		}
+	}
+
+	// ·´Ïò×·×Ù
+	for (int v = 0; v < h_; v++)
+	{
+		short* disp = DP.ptr<short>(v);
+		float c_min = vm.ptr<float>(v, 0)[0];
+		int d_min = 0;
+		float* cP = vm.ptr<float>(v, 0);
+		for (int d = 1; d < d_; d++)
+		{
+			if (cP[d] < c_min)
+			{
+				c_min = cP[d];
+				d_min = d;
+			}
+		}
+		disp[0] = d_min;
+		for (int u = 0; u < w_ - 1; u++)
+		{
+			int* traP = trace.ptr<int>(v, u);
+			int d_pre = traP[d_min];
+			disp[u + 1] = d_pre;
+			d_min = d_pre;
+		}
+	}
+}
+
+//void StereoMatching::so_two
+
+int StereoMatching::cal_histogram_for_HV(Mat& dispImg, int v_ancher, int u_ancher, int numThres, float ratioThre, int LOR = 0)
+{
+	int n = param_.numDisparities;
 	vector<int> hist(n, 0);
 	int validNum = 0;
-	int v_begin = v_ancher - HVL[0].ptr<ushort>(v_ancher, u_ancher)[2];
-	int v_end = v_ancher + HVL[0].ptr<ushort>(v_ancher, u_ancher)[3];
+	int v_begin = v_ancher - HVL[LOR].ptr<ushort>(v_ancher, u_ancher)[2];
+	int v_end = v_ancher + HVL[LOR].ptr<ushort>(v_ancher, u_ancher)[3];
 	for (int v = v_begin; v <= v_end; v++)
 	{
-		int u_begin = u_ancher - HVL[0].ptr<ushort>(v, u_ancher)[0];
-		int u_end = u_ancher + HVL[0].ptr<ushort>(v, u_ancher)[1];
+		int u_begin = u_ancher - HVL[LOR].ptr<ushort>(v, u_ancher)[0];
+		int u_end = u_ancher + HVL[LOR].ptr<ushort>(v, u_ancher)[1];
 		short* dispP = dispImg.ptr<short>(v);
 		for (int u = u_begin; u <= u_end; u++)
 		{
@@ -4085,23 +6925,23 @@ int StereoMatching::compareArmL(int v, int u)
 int StereoMatching::regionVoteCore(Mat& Dp, int v, int u, int SThres, float hratioThres)
 {
 	int dp_;
-	if (param_.cbca_armHV && param_.cbca_armTile)
-	{
-		if (param_.regVote_type == 2)
-		{
-			int result = compareArmL(v, u);
-			dp_ = result == 0 ? cal_histogram_for_HV(Dp, v, u, SThres, hratioThres) : cal_histogram_for_Tile(Dp, v, u, SThres, hratioThres);
-		}
-		else if (param_.regVote_type == 1)
-			dp_ = cal_histogram_for_Tile(Dp, v, u, SThres, hratioThres);
-		else
-			dp_ = cal_histogram_for_HV(Dp, v, u, SThres, hratioThres);
+	//if (param_.cbca_armHV && param_.cbca_armTile)
+	//{
+	//	if (param_.regVote_type == 2)
+	//	{
+	//		int result = compareArmL(v, u);
+	//		dp_ = result == 0 ? cal_histogram_for_HV(Dp, v, u, SThres, hratioThres) : cal_histogram_for_Tile(Dp, v, u, SThres, hratioThres);
+	//	}
+	//	else if (param_.regVote_type == 1)
+	//		dp_ = cal_histogram_for_Tile(Dp, v, u, SThres, hratioThres);
+	//	else
+	//		dp_ = cal_histogram_for_HV(Dp, v, u, SThres, hratioThres);
 
-	}
-	else if (param_.cbca_armHV)
+	//}
+	//if (param_.cbca_armHV)
 		dp_ = cal_histogram_for_HV(Dp, v, u, SThres, hratioThres);
-	else
-		dp_ = cal_histogram_for_Tile(Dp, v, u, SThres, hratioThres);
+	//else
+	//	dp_ = cal_histogram_for_Tile(Dp, v, u, SThres, hratioThres);
 	return dp_;
 }
 
@@ -4159,16 +6999,15 @@ void StereoMatching::backgroundInterpolateCore(Mat& Dp, int v, int u, int* resul
 	}
 	*result = candi_num;
 	result++;
-	if (candi_num == 0)
-		* result = -1;
-	else
-		*result = disp;
+	*result = disp == 10000 ? -1 : disp;
+
 	//int res_num = vec[0] <= vec[1] && vec[0] >= 0 ? 0 : 1;
 	//if (vec[res_num] < 0)
 	//	res_num = res_num == 0 ? 1 : 0;
 	//return vec[res_num];
 }
 
+// ´«Í³µÄ·½·¨
 int StereoMatching::backgroundInterpolateCore(Mat& Dp, int v, int u)
 {
 	vector<int> vec(2, -1);
@@ -4195,21 +7034,12 @@ int StereoMatching::backgroundInterpolateCore(Mat& Dp, int v, int u)
 		}
 		coeffi *= -1;
 	}
-
-	int candi_num = 0;
-	int disp = 10000;
-	for (int i = 0; i < 2; i++)
-	{
-		if (vec[i] >= 0)
-			candi_num++;
-		if (vec[i] >= 0 && vec[i] < disp)
-			disp = vec[i];
-	}
-
-	int res_num = vec[0] <= vec[1] && vec[0] >= 0 ? 0 : 1;
-	if (vec[res_num] < 0)
-		res_num = res_num == 0 ? 1 : 0;
-	return vec[res_num];
+	if (vec[0] != -1 && vec[1] == -1)
+		return vec[0];
+	else if (vec[0] == -1 && vec[1] != -1)
+		return vec[1];
+	else
+		return vec[0] < vec[1] ? vec[0] : vec[1];
 }
 
 int StereoMatching::backgroundInterpolateCore_(Mat& Dp, int v, int u)
@@ -4337,7 +7167,10 @@ void StereoMatching::RV_combine_BG(cv::Mat& Dp, float rv_ratio, int rv_s)
 			if (dpV < 0)
 				{
 					if (param_.interpolateType == 0)  // ÇøÓòÍ¶Æ±
+					{ 
 						dp_ = regionVoteCore(Dp, v, u, SThres, hratioThres);
+						//dp_ = cal_histogram_for_HV(Dp, v, u, SThres, hratioThres);
+					}
 					else if (param_.interpolateType == 1)  // ±³¾°²åÖµ
 						dp_ = backgroundInterpolateCore(Dp, v, u);
 					else if (param_.interpolateType == 2) // ÔÚÕÚµ²ÇøÓÃ±³¾°²åÖµ£¬ÎóÆ¥ÅäÇøÓÃÇøÓòÍ¶Æ±
@@ -4382,6 +7215,111 @@ void StereoMatching::RV_combine_BG(cv::Mat& Dp, float rv_ratio, int rv_s)
 	cout << "finish RV_combine_BG" << endl;
 }
 
+
+void StereoMatching::regionVote_my(cv::Mat& Dp, float rv_ratio, int rv_s)
+{
+	cout << "start RV_combine_BG_IP" << endl;
+	CV_Assert(Dp.type() == CV_16S);
+	const int n = param_.numDisparities;
+	const int SThres = rv_s;  // 15
+	const float hratioThres = rv_ratio;  // 0.4
+
+	const int bgiplDepth = param_.bgIplDepth;
+
+	//OMP_PARALLEL_FOR  ¼ÓÉÏºóÎó²îÔö´ó£¬Ô­ÒòÎ´Öª
+	Mat dp_res = Dp.clone();
+	int dp_ = -1;
+	int dp_bg = -1, dp_rv = -1;
+	for (int v = 0; v < h_; v++)
+	{
+		short* dpP = Dp.ptr<short>(v);
+		short* dp_resP = dp_res.ptr<short>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			short dpV = dpP[u];
+			if (dpV < 0)
+			{
+				int n = param_.numDisparities;
+				vector<int> hist(n, 0);
+				int validNum = 0;
+				int v_begin = v - HVL[0].ptr<ushort>(v, u)[2];
+				int v_end = v + HVL[0].ptr<ushort>(v, u)[3];
+				for (int v_n = v_begin; v_n <= v_end; v_n++)
+				{
+					int u_begin = u - HVL[0].ptr<ushort>(v_n, u)[0];
+					int u_end = u + HVL[0].ptr<ushort>(v_n, u)[1];
+					short* dispP = Dp.ptr<short>(v_n);
+					for (int u_n = u_begin; u_n <= u_end; u_n++)
+					{
+						if (dispP[u_n] >= 0)
+						{
+							validNum++;
+							hist[dispP[u_n]]++;
+						}
+					}
+				}
+				if (validNum <= rv_s)
+					continue;
+
+				int dispMost = 0;
+				for (int d = 1; d < n; d++)
+				{
+					if (hist[d] > hist[dispMost])
+						dispMost = d;
+				}
+				if (hist[dispMost] / validNum >= rv_ratio)
+					dp_resP[u] = dispMost;
+			}
+		}
+	}
+	dp_res.copyTo(Dp);
+	cout << "finish RV_combine_BG" << endl;
+}
+
+
+void StereoMatching::regionVote(cv::Mat& Dp, cv::Mat& cross)
+{
+	CV_Assert(Dp.type() == CV_16S);
+	const int n = param_.numDisparities;
+
+	//OMP_PARALLEL_FOR  ¼ÓÉÏºóÎó²îÔö´ó£¬Ô­ÒòÎ´Öª
+	Mat dp_res = Dp.clone();
+
+	for (int v = 0; v < h_; v++)
+	{
+		short* dp_resP = dp_res.ptr<short>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			int n = param_.numDisparities;
+			vector<int> hist(n, 0);
+			int v_begin = v - cross.ptr<ushort>(v, u)[2];
+			int v_end = v + cross.ptr<ushort>(v, u)[3];
+			for (int v_n = v_begin; v_n <= v_end; ++v_n)
+			{
+				int u_begin = u - cross.ptr<ushort>(v_n, u)[0];
+				int u_end = u + cross.ptr<ushort>(v_n, u)[1];
+				short* dispP = Dp.ptr<short>(v_n);
+				for (int u_n = u_begin; u_n <= u_end; ++u_n)
+				{
+					short cache = dispP[u_n];
+					if (cache >= 0)
+					{
+						hist[cache]++;
+					}
+				}
+			}
+			int dispMost = 0;
+			for (int d = 1; d < n; d++)
+			{
+				if (hist[d] > hist[dispMost])
+					dispMost = d;
+			}
+			dp_resP[u] = dispMost;
+		}
+	}
+	dp_res.copyTo(Dp);
+}
+
 void StereoMatching::BGIpol(cv::Mat& Dp)
 {
 	for (int v = 0; v < h_; v++)
@@ -4399,6 +7337,61 @@ void StereoMatching::BGIpol(cv::Mat& Dp)
 	}
 }
 
+void StereoMatching::WM(Mat& disp, Mat& mask, Mat& img)
+{
+	const int MED_SZ = 19;
+	const int wnd_R = MED_SZ / 2;
+	const float SIG_DIS = 9;
+	const float SIG_CLR = 25;
+	Mat disp_Bor, img_Bor;
+	vector<float> dispHist(d_, 0);
+	copyMakeBorder(disp, disp_Bor, wnd_R, wnd_R, wnd_R, wnd_R, BORDER_REFLECT_101);
+	copyMakeBorder(img, img_Bor, wnd_R, wnd_R, wnd_R, wnd_R, BORDER_REFLECT_101);
+	int num_err = 0;
+	int num = 0;
+	for (int v = 0; v < h_; v++)
+	{
+		uchar* mP = mask.ptr<uchar>(v);
+		for (int u = 0; u < w_; u++)
+		{
+			if (mP[u] > 0)
+			{
+				num_err++;
+				float wgtSum = 0;
+				uchar* ipP = img.ptr<uchar>(v, u);
+				for (int dv = -wnd_R; dv <= wnd_R; dv++)
+				{
+					for (int du = -wnd_R; du <= wnd_R; du++)
+					{
+						short q = disp_Bor.ptr<short>(v + wnd_R + dv)[u + wnd_R + du];
+						uchar* iqP = img_Bor.ptr<uchar>(v + wnd_R + dv, u + wnd_R + du);
+						float colDis = pow(ipP[0] - iqP[0], 2) + pow(ipP[1] - iqP[1], 2) + pow(ipP[2] - iqP[2], 2);
+						float spaDis = pow(dv, 2) + pow(du, 2);
+						float wgt = exp(-colDis / (SIG_CLR * SIG_CLR) - spaDis / (SIG_DIS * SIG_DIS));
+						dispHist[q] += wgt;
+						wgtSum += wgt;
+					}
+				}
+				float wgt_half = wgtSum / 2;
+				float wgt_cum = 0;
+				for (int d = 0; d < d_; d++)
+				{
+					wgt_cum += dispHist[d];
+					if (wgt_cum >= wgt_half)
+					{
+						disp.ptr<short>(v)[u] = d;
+						num++;
+						break;
+					}
+				}
+				dispHist.assign(d_, 0);
+			}
+		}
+	}
+	cout << "err num: " << num_err << endl;
+	cout << "WM num: " << num << endl;
+}
+
 void StereoMatching::properIpol(cv::Mat& Dp, cv::Mat& I1_c)
 {
 	CV_Assert(Dp.type() == CV_16S);
@@ -4414,15 +7407,15 @@ void StereoMatching::properIpol(cv::Mat& Dp, cv::Mat& I1_c)
 
 	for (int v = 0; v < h; v++)
 	{
-		short* vDptr = Dp.ptr<short>(v);
-		short* vDcoptr = DpCopy.ptr<short>(v);
+		short* dP = Dp.ptr<short>(v);
+		short* dcP = DpCopy.ptr<short>(v);
 		for (int u = 0; u < w; u++)
 		{
-			if (vDptr[u] >= 0)
-				vDcoptr[u] = vDptr[u];
-			if (vDptr[u] < 0)
+			if (dP[u] >= 0)
+				dcP[u] = dP[u];
+			if (dP[u] < 0)
 			{
-				vector<int> directionDisp(16, vDptr[u]);
+				vector<int> directionDisp(16, -1);
 				vector<int> directionDiff(16, -1);
 				for (int direction = 0; direction < 16; direction++)
 				{
@@ -4464,7 +7457,7 @@ void StereoMatching::properIpol(cv::Mat& Dp, cv::Mat& I1_c)
 						}
 					}
 				}
-				if (vDptr[u] == param_.DISP_OCC)  // param.DISP_OCC = -2 * 16
+				if (dP[u] == param_.DISP_OCC)  // param.DISP_OCC = -2 * 16
 				{
 					int minDisp = numeric_limits<int>::max();
 					int init = minDisp;
@@ -4473,7 +7466,7 @@ void StereoMatching::properIpol(cv::Mat& Dp, cv::Mat& I1_c)
 						if (directionDisp[direction] >= 0 && minDisp > directionDisp[direction])
 							minDisp = directionDisp[direction];
 					}
-					vDcoptr[u] = init != minDisp ? minDisp : vDptr[u];  // ·ÀÖ¹Ã»ÓÐÕÒµ½µÄÇé¿ö
+					dcP[u] = init != minDisp ? minDisp : dP[u];  // ·ÀÖ¹Ã»ÓÐÕÒµ½µÄÇé¿ö
 				}
 				else
 				{
@@ -4487,7 +7480,7 @@ void StereoMatching::properIpol(cv::Mat& Dp, cv::Mat& I1_c)
 							disp = directionDisp[direction];
 						}
 					}
-					vDcoptr[u] = disp >= 0 ? disp : vDptr[u];
+					dcP[u] = disp >= 0 ? disp : dP[u];
 				}
 
 			}
@@ -4759,7 +7752,7 @@ void StereoMatching::cbbi(Mat& Dp)
 			}
 		}
 		if (iteration == 0)
-			saveDispMap<short>(Dp, "06disp_cbbi0");
+			saveDispMap<short>(Dp, DT, "06disp_cbbi0");
 
 		clock_t end = clock();
 		clock_t time = end - start;
@@ -4955,7 +7948,6 @@ void StereoMatching::showParams()
 		printf("cbca_minArmL: %d\n", param_.cbca_minArmL);
 		printf("cbca_genArm_isColor: %d\n", cbca_genArm_isColor);
 		printf("cbca_AD_isColor: %d\n", cbca_AD_isColor);
-		printf("cbca_Cross_C: %d\n", param_.Cross_C);
 		printf("cbca_Cross_L[0]: %d\n", param_.cbca_crossL[0]);
 		printf("cbca_Cross_L[1]: %d\n", param_.cbca_crossL[1]);
 		printf("cbca_arm_out: %d\n", cbca_arm_out);
